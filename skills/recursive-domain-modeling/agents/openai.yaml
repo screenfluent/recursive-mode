@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recursive Domain Modeling"
+  short_description: "Sharpen domain language and maintain GLOSSARY.md"
+  default_prompt: "Use $recursive-domain-modeling to resolve domain terms and update the glossary after human approval."
