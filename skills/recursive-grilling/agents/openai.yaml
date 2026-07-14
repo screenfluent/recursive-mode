@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recursive Grilling"
+  short_description: "Stress-test human decisions one at a time"
+  default_prompt: "Use $recursive-grilling to stress-test this draft one decision at a time."
