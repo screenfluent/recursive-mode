@@ -45,13 +45,15 @@ def windows_temp_source_fixture() -> str:
 
 
 class InstallRecursiveModeTests(unittest.TestCase):
-    def test_package_surface_includes_recursive_training(self) -> None:
+    def test_package_surface_matches_expected_skills(self) -> None:
         repo_root = REPO_ROOT
         installable_skills = {path.parent.name for path in (repo_root / "skills").glob("*/SKILL.md")}
 
         self.assertEqual(
             {
                 "recursive-debugging",
+                "recursive-domain-modeling",
+                "recursive-grilling",
                 "recursive-mode",
                 "recursive-review-bundle",
                 "recursive-router",
