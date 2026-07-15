@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recursive Research"
+  short_description: "High-trust primary-source research with citations"
+  default_prompt: "Use $recursive-research to investigate this question against high-trust primary sources and capture verified, cited findings in one Markdown report in its owning context."
