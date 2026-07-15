@@ -28,11 +28,11 @@ Scope note: Root-cause evidence only; production fixes remain in Phase 3.
 
 ## Audit Context
 
-Audit Execution Mode: self-audit
-Subagent Availability: unavailable
-Subagent Capability Probe: <evidence proving unavailability>
-Delegation Decision Basis: <why self-audit is required>
-Delegation Override Reason: not applicable because subagents are unavailable
+Audit Execution Mode: self-audit / subagent
+Subagent Availability: available / unavailable
+Subagent Capability Probe: <what proved availability or unavailability>
+Delegation Decision Basis: <why self-audit or delegation was chosen>
+Delegation Override Reason: none / <required when subagents are available but self-audit is selected>
 Audit Inputs Provided:
 - `/.recursive/run/<run-id>/00-requirements.md`
 - `/.recursive/run/<run-id>/00-worktree.md`
@@ -140,11 +140,11 @@ Add ranks 4–5 only when they remain distinct and falsifiable.
 
 ## Subagent Contribution Verification
 
-- Reviewed Action Records: none
-- Main-Agent Verification Performed: `/.recursive/run/<run-id>/01.5-root-cause.md`, `<code or evidence paths checked by the controller>`
-- Acceptance Decision: accepted
-- Refresh Handling: no delegated action record required refresh
-- Repair Performed After Verification: none
+- Reviewed Action Records: `none` / `/.recursive/run/<run-id>/subagents/<record>.md`
+- Main-Agent Verification Performed: `<code, evidence, artifact, or diff-owned paths checked by the controller>`
+- Acceptance Decision: `accepted|partially accepted|rejected` / `not applicable — no delegated contribution`
+- Refresh Handling: <whether the action record was refreshed after repairs or why no refresh was needed>
+- Repair Performed After Verification: `none` / <concrete repair paths or artifact updates performed after verification>
 
 ## Worktree Diff Audit
 

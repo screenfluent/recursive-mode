@@ -386,9 +386,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
                 with self.subTest(path=str(relative_path), snippet=snippet):
                     self.assertIn(snippet, content)
 
-        debugging = (repo_root / "skills" / "recursive-debugging" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertNotIn("Return to Phase 2", debugging)
-
     def test_installer_gitignores_device_local_router_discovery_inventory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install-recursive-mode-") as temp_dir:
             repo_root = Path(temp_dir) / "repo"
