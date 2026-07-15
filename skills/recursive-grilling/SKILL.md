@@ -1,11 +1,11 @@
 ---
 name: recursive-grilling
-description: 'Grill and stress-test a draft by resolving its decision tree one human choice at a time. Use when the user asks to challenge a plan, requirements, design, or proposal, or when another skill reaches an unresolved human decision.'
+description: 'Grill and stress-test a draft relentlessly by resolving its decision tree one human choice at a time. Use when the user asks to challenge a plan, requirements, design, or proposal, or when another skill reaches an unresolved human decision.'
 ---
 
 # Recursive Grilling
 
-Close human decisions in an agreed scope. Treat grilling as a shared conversational method, not a lifecycle stage.
+Relentlessly close human decisions in an agreed scope. Treat grilling as a shared conversational method, not a lifecycle stage.
 
 ## Build the decision tree
 
