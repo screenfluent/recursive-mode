@@ -1,6 +1,6 @@
 ---
 name: recursive-domain-modeling
-description: 'Actively sharpen project domain language and maintain the human-authoritative glossary. Use when a term is unclear, overloaded, or conflicts with the glossary or code; when the user asks to model the domain or edit the glossary; or when another skill proposes adding, changing, or removing a glossary definition.'
+description: 'Actively sharpen project domain language and maintain the human-authoritative glossary. Use when a term is unclear, overloaded, or conflicts with the glossary or code; when the user asks to pin down domain terminology or a ubiquitous language, model the domain, or edit the glossary; or when another skill proposes adding, changing, or removing a glossary definition.'
 ---
 
 # Recursive Domain Modeling
