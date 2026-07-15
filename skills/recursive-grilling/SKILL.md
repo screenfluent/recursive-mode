@@ -45,5 +45,5 @@ Finish only when the human confirms shared understanding. Until then, do not car
 ## Boundaries
 
 - Grilling does not create a recursive run and does not implement code.
-- Keep requirements ownership with `recursive-spec` and module, seam, and dependency design with `recursive-design`.
+- Keep requirements ownership with `recursive-spec` and module, seam, and dependency design with `recursive-codebase-design`.
 - Propose an ADR only when the decision is hard to reverse, surprising without context, and a real trade-off. Write it only after explicit human approval.

@@ -52,6 +52,7 @@ class InstallRecursiveModeTests(unittest.TestCase):
         self.assertEqual(
             {
                 "recursive-debugging",
+                "recursive-codebase-design",
                 "recursive-domain-modeling",
                 "recursive-grilling",
                 "recursive-mode",

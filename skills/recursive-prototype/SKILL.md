@@ -1,6 +1,6 @@
 ---
 name: recursive-prototype
-description: 'Build a throwaway prototype to answer a design question. Use when the user wants to sanity-check whether a state model or logic feels right, explore what a UI should look like, or give recursive-design empirical evidence before Phase 2 lock.'
+description: 'Build a throwaway prototype to answer a design question. Use when the user wants to sanity-check whether a state model or logic feels right, explore what a UI should look like, or give recursive-codebase-design empirical evidence before Phase 2 lock.'
 ---
 
 # Recursive Prototype
@@ -63,7 +63,7 @@ Include only:
 - Verdict
 - Design consequence
 
-Prototype source never enters evidence, the product/run worktree, or `main`. Hand the verdict and design consequence to `recursive-design`, which owns the accepted design and any ADR.
+Prototype source never enters evidence, the product/run worktree, or `main`. Hand the verdict and design consequence to `recursive-codebase-design`, which owns the accepted design and any ADR.
 
 Outside an active run or selected map unit, return the same capture to the human. Persist it only at a location the human selects; create no default documentation plane.
 
@@ -83,7 +83,7 @@ Hand production implementation to `recursive-tdd`, which owns the RED-before-lif
 - the recorded command runs the prototype;
 - the prototype commit is reachable through the recorded pointer;
 - the active-run capture contains report, commands, and pointer but no source;
-- for an active run, the design consequence is handed to `recursive-design` before Phase 2 lock;
+- for an active run, the design consequence is handed to `recursive-codebase-design` before Phase 2 lock;
 - outside a run, the capture is returned to the human with no Phase 2 dependency;
 - prototype source introduced no change to the product/run worktree or `main`.
 
@@ -94,6 +94,6 @@ Hand production implementation to `recursive-tdd`, which owns the RED-before-lif
 ## Boundaries
 
 - `recursive-prototype` owns the isolated experiment, its source ref, and its capture.
-- `recursive-design` owns accepted interfaces, seams, execution shape, and ADR decisions.
+- `recursive-codebase-design` owns accepted interfaces, seams, execution shape, and ADR decisions.
 - `recursive-tdd` owns the RED-before-lift contract, production GREEN, refactoring, and verification.
 - This skill creates neither a recursive run nor a recursive phase.

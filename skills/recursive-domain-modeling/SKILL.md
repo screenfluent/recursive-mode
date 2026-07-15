@@ -75,7 +75,7 @@ ADR authorship is shared: domain modeling, design, grilling, or another owner ma
 ## Boundaries
 
 - This skill does not create a recursive run and does not implement product code.
-- Keep requirements ownership with `recursive-spec` and module/seam design with `recursive-design`.
+- Keep requirements ownership with `recursive-spec` and module/seam design with `recursive-codebase-design`.
 - Use `recursive-grilling` when a language choice is a human trade-off that needs the decision-tree interview.
 - Phase 8 may flag term drift and request this skill; Phase 8 never rewrites the glossary autonomously.
 
