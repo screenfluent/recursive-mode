@@ -58,6 +58,7 @@ class InstallRecursiveModeTests(unittest.TestCase):
                 "recursive-mode",
                 "recursive-prototype",
                 "recursive-research",
+                "recursive-residue-sweep",
                 "recursive-review-bundle",
                 "recursive-router",
                 "recursive-spec",
