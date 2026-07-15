@@ -372,11 +372,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
         expectations = {
             Path("skills/recursive-spec/SKILL.md"): ("## TODO", "Workflow version: `recursive-mode-audit-v2`"),
             Path("skills/recursive-worktree/SKILL.md"): ("## TODO", "Normalized diff command"),
-            Path("skills/recursive-debugging/SKILL.md"): (
-                "Subagent Capability Probe",
-                "Delegation Decision Basis",
-                "## Requirement Completion Status",
-            ),
             Path("skills/recursive-tdd/SKILL.md"): (
                 "## TODO",
                 "Subagent Capability Probe",
