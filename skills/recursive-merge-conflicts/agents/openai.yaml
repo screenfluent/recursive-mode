@@ -1,0 +1,6 @@
+interface:
+  display_name: "Recursive Merge Conflicts"
+  short_description: "Resolve active merge and rebase conflicts"
+  default_prompt: "Use $recursive-merge-conflicts to resolve the active Git conflict by intent."
+policy:
+  allow_implicit_invocation: true

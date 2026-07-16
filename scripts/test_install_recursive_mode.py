@@ -56,6 +56,7 @@ class InstallRecursiveModeTests(unittest.TestCase):
                 "recursive-domain-modeling",
                 "recursive-grilling",
                 "recursive-handoff",
+                "recursive-merge-conflicts",
                 "recursive-mode",
                 "recursive-prototype",
                 "recursive-research",
