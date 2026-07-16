@@ -14,24 +14,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import recursive_phase_rules as phase_rules_registry
+import recursive_review_action as review_action
 
-CURRENT_WORKFLOW_PROFILE = "recursive-mode-audit-v2"
-STRICT_WORKFLOW_PROFILE = "recursive-mode-audit-v1"
-COMPAT_WORKFLOW_PROFILE = "memory-phase8"
-STRICT_WORKFLOW_PROFILES = {CURRENT_WORKFLOW_PROFILE, STRICT_WORKFLOW_PROFILE}
-LATE_PHASE_KEYS = {"06", "07", "08"}
-LATE_PHASE_FILES = {"06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"}
-AUDITED_PHASE_FILES = {
-    "01-as-is.md",
-    "01.5-root-cause.md",
-    "02-to-be-plan.md",
-    "03-implementation-summary.md",
-    "03.5-code-review.md",
-    "04-test-summary.md",
-    "06-decisions-update.md",
-    "07-state-update.md",
-    "08-memory-impact.md",
-}
+
+AUDITED_PHASE_FILES = phase_rules_registry.AUDITED_ARTIFACTS
 PRIOR_RECURSIVE_EVIDENCE_FILES = {
     "01-as-is.md",
     "02-to-be-plan.md",
@@ -86,10 +73,8 @@ AUDIT_REQUIRED_HEADINGS = [
     "Earlier Phase Reconciliation",
     "Subagent Contribution Verification",
     "Worktree Diff Audit",
-    "Gaps Found",
-    "Repair Work Performed",
     "Requirement Completion Status",
-    "Audit Verdict",
+    "Review Metadata",
 ]
 DIFF_BASIS_FIELDS = [
     "Baseline type",
@@ -564,9 +549,7 @@ def get_expected_effective_input_addenda_paths(run_dir: Path, file_name: str) ->
     return sorted(set(expected_paths))
 
 
-def collect_effective_input_addenda_blockers(file_name: str, content: str, workflow_profile: str, run_dir: Path) -> list[str]:
-    if workflow_profile not in (STRICT_WORKFLOW_PROFILES | {COMPAT_WORKFLOW_PROFILE}):
-        return []
+def collect_effective_input_addenda_blockers(file_name: str, content: str, run_dir: Path) -> list[str]:
     if is_addendum_artifact(file_name):
         return []
 
@@ -580,7 +563,7 @@ def collect_effective_input_addenda_blockers(file_name: str, content: str, workf
     if missing_inputs:
         blockers.append(f"Missing effective-input addenda in Inputs: {', '.join(missing_inputs[:5])}")
 
-    if workflow_profile in STRICT_WORKFLOW_PROFILES and file_name in AUDITED_PHASE_FILES:
+    if file_name in AUDITED_PHASE_FILES:
         reread_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(content, "Effective Inputs Re-read"))}
         missing_reread = [path for path in expected_addenda if path not in reread_paths]
         if missing_reread:
@@ -834,13 +817,12 @@ def collect_requirement_disposition_blockers(
 def collect_requirement_completion_blockers(
     file_name: str,
     content: str,
-    workflow_profile: str,
     requirement_ids: list[str],
     run_dir: Path,
     repo_root: Path,
     actual_changed_files: list[str] | None,
 ) -> list[str]:
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_name not in AUDITED_PHASE_FILES:
+    if file_name not in AUDITED_PHASE_FILES:
         return []
 
     body = get_heading_body(content, "Requirement Completion Status")
@@ -890,10 +872,9 @@ def collect_requirement_completion_blockers(
 def collect_prior_recursive_evidence_blockers(
     file_name: str,
     content: str,
-    workflow_profile: str,
     repo_root: Path,
 ) -> list[str]:
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_name not in PRIOR_RECURSIVE_EVIDENCE_FILES:
+    if file_name not in PRIOR_RECURSIVE_EVIDENCE_FILES:
         return []
 
     body = get_heading_body(content, "Prior Recursive Evidence Reviewed")
@@ -987,12 +968,11 @@ def parse_subagent_action_record_claims(action_content: str) -> dict[str, set[st
 def collect_subagent_contribution_blockers(
     file_name: str,
     content: str,
-    workflow_profile: str,
     run_dir: Path,
     repo_root: Path,
     actual_changed_files: list[str] | None,
 ) -> list[str]:
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_name not in AUDITED_PHASE_FILES:
+    if file_name not in AUDITED_PHASE_FILES:
         return []
 
     body = get_heading_body(content, "Subagent Contribution Verification")
@@ -1039,6 +1019,15 @@ def collect_subagent_contribution_blockers(
             blockers.append(f"Referenced subagent action record does not exist: {action_record_path}")
             continue
         action_content = action_path.read_text(encoding="utf-8")
+        blockers.extend(
+            review_action.validate_action_record(
+                repo_root,
+                action_content,
+                expected_run=run_dir.name,
+                expected_phase=current_phase,
+                owning_artifact=file_name,
+            ).issues
+        )
         action_claims = parse_subagent_action_record_claims(action_content)
         metadata = get_heading_body(action_content, "Metadata")
         inputs = get_heading_body(action_content, "Inputs Provided")
@@ -1241,120 +1230,6 @@ def collect_reviewed_paths(run_dir: Path, artifact_name: str, content: str) -> s
     return reviewed_paths
 
 
-def collect_review_bundle_blockers(content: str, run_dir: Path, repo_root: Path) -> list[str]:
-    blockers: list[str] = []
-    review_metadata = get_heading_body(content, "Review Metadata")
-    bundle_path = (
-        get_md_field_value(review_metadata, "Review Bundle Path")
-        or get_md_field_value(content, "Review Bundle Path")
-        or ""
-    ).strip()
-    expected_prefix = f".recursive/run/{run_dir.name}/evidence/review-bundles/"
-
-    if not bundle_path:
-        blockers.append("Missing Review Bundle Path in Review Metadata")
-        return blockers
-
-    normalized_bundle_path = normalize_repo_path(bundle_path)
-    if not normalized_bundle_path.startswith(expected_prefix):
-        blockers.append(f"Review Bundle Path must live under `/{expected_prefix}`")
-        return blockers
-
-    if not (repo_root / normalized_bundle_path).exists():
-        blockers.append(f"Missing review bundle file: {normalized_bundle_path}")
-        return blockers
-
-    bundle_content = (repo_root / normalized_bundle_path).read_text(encoding="utf-8")
-    artifact_path = normalize_repo_path(get_md_field_value(bundle_content, "Artifact Path") or "")
-    artifact_hash = trim_md_value(get_md_field_value(bundle_content, "Artifact Content Hash") or "")
-    if not artifact_path:
-        blockers.append("Review bundle is missing Artifact Path")
-    elif not (repo_root / artifact_path).exists():
-        blockers.append(f"Review bundle Artifact Path does not exist: {artifact_path}")
-    if artifact_path:
-        current_hash = content_sha256((repo_root / artifact_path).read_text(encoding="utf-8")) if (repo_root / artifact_path).exists() else ""
-        if artifact_hash and current_hash and artifact_hash != current_hash:
-            blockers.append("Review bundle is stale: Artifact Content Hash no longer matches the current artifact")
-    if not artifact_hash:
-        blockers.append("Review bundle is missing Artifact Content Hash")
-
-    missing_bundle_headings = []
-    for heading in (
-        "Diff Basis",
-        "Changed Files Reviewed",
-        "Upstream Artifacts To Re-read",
-        "Relevant Addenda",
-        "Prior Recursive Evidence",
-        "Targeted Code References",
-        "Audit Questions",
-        "Required Output",
-    ):
-        if not get_heading_body(bundle_content, heading):
-            missing_bundle_headings.append(heading)
-    if missing_bundle_headings:
-        blockers.append(f"Review bundle is missing required section(s): {', '.join(missing_bundle_headings)}")
-
-    review_narrative = "\n".join(
-        [
-            get_heading_body(content, "Review Scope"),
-            get_heading_body(content, "Requirement And Plan Reconciliation"),
-            get_heading_body(content, "Plan Alignment Assessment"),
-            get_heading_body(content, "Code Quality Assessment"),
-            get_heading_body(content, "Issues Found"),
-            get_heading_body(content, "Verdict"),
-        ]
-    )
-    cited_paths = {normalize_repo_path(path) for path in extract_paths_from_text(content)}
-    cited_review_paths = {normalize_repo_path(path) for path in extract_paths_from_text(review_narrative)}
-    upstream_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Upstream Artifacts To Re-read"))}
-    addenda_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Relevant Addenda"))}
-    prior_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Prior Recursive Evidence"))}
-    changed_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Changed Files Reviewed"))}
-    code_ref_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Targeted Code References"))}
-    audit_questions = get_heading_body(bundle_content, "Audit Questions")
-    if is_placeholder_only(audit_questions):
-        blockers.append("Review bundle Audit Questions cannot be placeholder-only")
-    diff_basis_body = get_heading_body(bundle_content, "Diff Basis")
-    for field_name in DIFF_BASIS_FIELDS:
-        if get_md_field_value(diff_basis_body, field_name) is None:
-            blockers.append(f"Review bundle Diff Basis is missing {field_name}")
-    if not changed_paths:
-        blockers.append("Review bundle Changed Files Reviewed cannot be empty")
-    else:
-        missing_changed_paths = find_missing_repo_paths(repo_root, sorted(changed_paths))
-        if missing_changed_paths:
-            blockers.append(f"Review bundle changed file path(s) do not exist: {', '.join(missing_changed_paths[:5])}")
-    if not code_ref_paths:
-        blockers.append("Review bundle Targeted Code References cannot be empty")
-    else:
-        missing_code_refs = find_missing_repo_paths(repo_root, sorted(code_ref_paths))
-        if missing_code_refs:
-            blockers.append(f"Review bundle code ref path(s) do not exist: {', '.join(missing_code_refs[:5])}")
-        elif changed_paths and not any(path in changed_paths for path in code_ref_paths):
-            blockers.append("Review bundle Targeted Code References do not overlap the changed-file scope")
-    expected_addenda = set(get_expected_effective_input_addenda_paths(run_dir, "03.5-code-review.md"))
-    missing_bundle_addenda = sorted(path for path in expected_addenda if path not in addenda_paths)
-    if missing_bundle_addenda:
-        blockers.append(f"Review bundle is missing effective-input addenda: {', '.join(missing_bundle_addenda[:5])}")
-
-    if upstream_paths and not any(path in cited_review_paths for path in upstream_paths):
-        blockers.append("Review narrative does not cite any upstream artifact from the review bundle")
-    if addenda_paths and not any(path in cited_review_paths for path in addenda_paths):
-        blockers.append("Review narrative does not cite any relevant addendum from the review bundle")
-    if prior_paths and not any(path in cited_review_paths for path in prior_paths):
-        blockers.append("Review narrative does not cite any prior recursive evidence from the review bundle")
-    if (changed_paths or code_ref_paths) and not any(path in cited_review_paths for path in (changed_paths | code_ref_paths)):
-        blockers.append("Review narrative does not cite any changed file or code reference from the review bundle")
-    if normalized_bundle_path not in cited_paths:
-        blockers.append("Review artifact does not cite its Review Bundle Path")
-
-    verdict_body = get_heading_body(content, "Verdict")
-    if not verdict_body or is_placeholder_only(verdict_body):
-        blockers.append("Verdict section must contain a concrete review verdict grounded in the review bundle")
-
-    return blockers
-
-
 def collect_phase8_skill_usage_blockers(content: str) -> list[str]:
     blockers: list[str] = []
     usage_body = get_heading_body(content, "Run-Local Skill Usage Capture")
@@ -1415,7 +1290,6 @@ def collect_phase8_skill_usage_blockers(content: str) -> list[str]:
 def collect_phase_specific_blockers(
     file_name: str,
     content: str,
-    workflow_profile: str,
     run_dir: Path,
     repo_root: Path,
     requirement_ids: list[str],
@@ -1425,15 +1299,11 @@ def collect_phase_specific_blockers(
     blockers = lint.lint_phase_specific_rules(
         run_dir / file_name,
         content,
-        workflow_profile,
         run_dir,
         repo_root,
         requirement_ids,
         actual_changed_files,
     )
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES:
-        return blockers
-
     if file_name == "00-worktree.md":
         _diff_basis, diff_basis_error = normalize_diff_basis(repo_root, get_run_diff_basis(run_dir))
         if diff_basis_error:
@@ -1514,8 +1384,6 @@ def collect_phase_specific_blockers(
                     if missing_qa_paths:
                         blockers.append(f"Missing QA evidence file(s): {', '.join(missing_qa_paths[:5])}")
 
-    if file_name == "03.5-code-review.md":
-        blockers.extend(collect_review_bundle_blockers(content, run_dir, repo_root))
     if file_name == "08-memory-impact.md":
         blockers.extend(collect_phase8_skill_usage_blockers(content))
 
@@ -1528,24 +1396,6 @@ def get_latest_run_directory(run_root: Path) -> Path | None:
         return None
     runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return runs[0]
-
-
-def get_workflow_profile(run_dir: Path) -> str:
-    requirements_path = run_dir / "00-requirements.md"
-    if requirements_path.exists():
-        content = requirements_path.read_text(encoding="utf-8")
-        workflow_version = get_md_field_value(content, "Workflow version")
-        if workflow_version == CURRENT_WORKFLOW_PROFILE:
-            return CURRENT_WORKFLOW_PROFILE
-        if workflow_version == STRICT_WORKFLOW_PROFILE:
-            return STRICT_WORKFLOW_PROFILE
-        if workflow_version == COMPAT_WORKFLOW_PROFILE:
-            return COMPAT_WORKFLOW_PROFILE
-
-    if any((run_dir / file_name).exists() for file_name in LATE_PHASE_FILES):
-        return COMPAT_WORKFLOW_PROFILE
-
-    return "legacy"
 
 
 def get_run_diff_basis(run_dir: Path) -> dict[str, str | None]:
@@ -1720,26 +1570,14 @@ class ArtifactState:
 def collect_audit_blockers(
     file_name: str,
     content: str,
-    workflow_profile: str,
     requirement_ids: list[str],
     actual_changed_files: list[str] | None,
     diff_basis_error: str | None,
     run_dir: Path,
 ) -> list[str]:
     blockers: list[str] = []
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_name not in AUDITED_PHASE_FILES:
+    if file_name not in AUDITED_PHASE_FILES:
         return blockers
-
-    audit = get_gate_status(content, "Audit")
-    coverage = get_gate_status(content, "Coverage")
-    approval = get_gate_status(content, "Approval")
-
-    if audit != "PASS":
-        blockers.append(f"Audit verdict is {audit}")
-    if coverage == "PASS" and audit != "PASS":
-        blockers.append("Coverage cannot pass before Audit: PASS")
-    if approval == "PASS" and audit != "PASS":
-        blockers.append("Approval cannot pass before Audit: PASS")
 
     audit_context = get_heading_body(content, "Audit Context")
     if not audit_context:
@@ -1771,10 +1609,6 @@ def collect_audit_blockers(
     for field_name in DIFF_BASIS_FIELDS:
         if get_md_field_value(diff_audit_body, field_name) is None:
             blockers.append(f"Missing diff basis field: {field_name}:")
-    gaps_body = get_heading_body(content, "Gaps Found")
-    if audit == "PASS" and gaps_body and not re.search(r"\bnone\b", gaps_body, re.IGNORECASE):
-        blockers.append("Audit: PASS is invalid while Gaps Found still lists unresolved in-scope gaps")
-
     expected_changed_files = get_phase_owned_actual_changed_files(file_name, actual_changed_files)
     if file_name in DIFF_AUDITED_FILES and expected_changed_files is not None:
         if diff_basis_error:
@@ -1792,7 +1626,6 @@ def collect_audit_blockers(
 
 def get_artifact_state(
     artifact_path: Path,
-    workflow_profile: str,
     requirement_ids: list[str],
     actual_changed_files: list[str] | None,
     diff_basis_error: str | None,
@@ -1845,8 +1678,6 @@ def get_artifact_state(
             lock_problems.append(f"Coverage gate is {coverage}")
         if approval != "PASS":
             lock_problems.append(f"Approval gate is {approval}")
-        if workflow_profile in STRICT_WORKFLOW_PROFILES and artifact_path.name in AUDITED_PHASE_FILES and audit != "PASS":
-            lock_problems.append(f"Audit gate is {audit}")
         if artifact_path.name == "03-implementation-summary.md" and tdd_compliance != "PASS":
             lock_problems.append(f"TDD Compliance gate is {tdd_compliance}")
         if not has_todo:
@@ -1857,7 +1688,6 @@ def get_artifact_state(
             collect_phase_specific_blockers(
                 artifact_path.name,
                 content,
-                workflow_profile,
                 run_dir,
                 repo_root,
                 requirement_ids,
@@ -1867,12 +1697,11 @@ def get_artifact_state(
         if not lock_problems:
             lock_valid = True
 
-    blockers.extend(collect_audit_blockers(artifact_path.name, content, workflow_profile, requirement_ids, actual_changed_files, diff_basis_error, artifact_path.parent))
+    blockers.extend(collect_audit_blockers(artifact_path.name, content, requirement_ids, actual_changed_files, diff_basis_error, artifact_path.parent))
     blockers.extend(
         collect_phase_specific_blockers(
             artifact_path.name,
             content,
-            workflow_profile,
             run_dir,
             repo_root,
             requirement_ids,
@@ -1912,14 +1741,14 @@ def get_artifact_state(
     )
 
 
-def print_phase_status(phases: list[dict[str, str]], states: dict[str, ArtifactState], show_hashes: bool, run_id: str, workflow_profile: str) -> None:
+def print_phase_status(phases: list[dict[str, str]], states: dict[str, ArtifactState], show_hashes: bool, run_id: str) -> None:
     print("Phase Status:")
     for phase in phases:
         state = states[phase["Key"]]
         display = state.status
         suffix = ""
         if display == "SKIPPED":
-            suffix = " (legacy workflow)" if phase["Key"] in LATE_PHASE_KEYS and workflow_profile == "legacy" else " (not needed)"
+            suffix = " (not needed)"
         elif display == "LOCKED" and not state.lock_valid:
             display = "LOCKED*"
             suffix = " (invalid)"
@@ -1982,41 +1811,44 @@ def main() -> None:
         run_dir = latest
         run_id = latest.name
 
-    workflow_profile = get_workflow_profile(run_dir)
     requirement_ids: list[str] = []
     requirements_path = run_dir / "00-requirements.md"
     if requirements_path.exists():
-        requirement_ids = load_lint_module().get_run_requirement_ids(run_dir, workflow_profile)
+        requirement_ids = load_lint_module().get_run_requirement_ids(run_dir)
 
     actual_changed_files: list[str] | None = None
     diff_basis_error: str | None = None
-    if workflow_profile in STRICT_WORKFLOW_PROFILES:
-        diff_basis = get_run_diff_basis(run_dir)
-        raw_changed_files, diff_basis_error = get_git_changed_files(repo_root, diff_basis)
-        if raw_changed_files is not None:
-            actual_changed_files = filter_runtime_changed_files(raw_changed_files, run_id)
+    diff_basis = get_run_diff_basis(run_dir)
+    raw_changed_files, diff_basis_error = get_git_changed_files(repo_root, diff_basis)
+    if raw_changed_files is not None:
+        actual_changed_files = filter_runtime_changed_files(raw_changed_files, run_id)
 
+    phase_rules = load_phase_rules_module()
+    lint = load_lint_module()
+    activated_phases, activation_issues = lint.get_active_scheduled_owner_phases(repo_root, run_dir)
+    phase_display = {
+        "00-requirements.md": ("00R", "Phase 0 (Requirements)", "0 (Requirements)"),
+        "00-worktree.md": ("00W", "Phase 0 (Worktree)", "0 (Worktree)"),
+        "01-as-is.md": ("01", "Phase 1 (AS-IS)", "1 (AS-IS)"),
+        "01.5-root-cause.md": ("01.5", "Phase 1.5 (Root Cause)", "1.5 (Root Cause)"),
+        "02-to-be-plan.md": ("02", "Phase 2 (TO-BE Plan)", "2 (TO-BE Plan)"),
+        "03-implementation-summary.md": ("03", "Phase 3 (Implementation)", "3 (Implementation)"),
+        "03.5-code-review.md": ("03.5", "Phase 3.5 (Code Review)", "3.5 (Code Review)"),
+        "04-test-summary.md": ("04", "Phase 4 (Test Summary)", "4 (Test Summary)"),
+        "05-manual-qa.md": ("05", "Phase 5 (Manual QA)", "5 (Manual QA)"),
+        "06-decisions-update.md": ("06", "Phase 6 (Decisions)", "6 (Decisions Update)"),
+        "07-state-update.md": ("07", "Phase 7 (State)", "7 (State Update)"),
+        "08-memory-impact.md": ("08", "Phase 8 (Memory)", "8 (Memory Impact)"),
+    }
     phases = [
-        {"Key": "00R", "Label": "Phase 0 (Requirements)", "File": "00-requirements.md", "Optional": False, "PhaseName": "0 (Requirements)"},
-        {"Key": "00W", "Label": "Phase 0 (Worktree)", "File": "00-worktree.md", "Optional": False, "PhaseName": "0 (Worktree)"},
-        {"Key": "01", "Label": "Phase 1 (AS-IS)", "File": "01-as-is.md", "Optional": False, "PhaseName": "1 (AS-IS)"},
-        {"Key": "01.5", "Label": "Phase 1.5 (Root Cause)", "File": "01.5-root-cause.md", "Optional": True, "PhaseName": "1.5 (Root Cause)"},
-        {"Key": "02", "Label": "Phase 2 (TO-BE Plan)", "File": "02-to-be-plan.md", "Optional": False, "PhaseName": "2 (TO-BE Plan)"},
-        {"Key": "03", "Label": "Phase 3 (Implementation)", "File": "03-implementation-summary.md", "Optional": False, "PhaseName": "3 (Implementation)"},
-        {"Key": "03.5", "Label": "Phase 3.5 (Code Review)", "File": "03.5-code-review.md", "Optional": True, "PhaseName": "3.5 (Code Review)"},
-        {"Key": "04", "Label": "Phase 4 (Test Summary)", "File": "04-test-summary.md", "Optional": False, "PhaseName": "4 (Test Summary)"},
-        {"Key": "05", "Label": "Phase 5 (Manual QA)", "File": "05-manual-qa.md", "Optional": False, "PhaseName": "5 (Manual QA)"},
-        {"Key": "06", "Label": "Phase 6 (Decisions)", "File": "06-decisions-update.md", "Optional": False, "PhaseName": "6 (Decisions Update)"},
-        {"Key": "07", "Label": "Phase 7 (State)", "File": "07-state-update.md", "Optional": False, "PhaseName": "7 (State Update)"},
-        {"Key": "08", "Label": "Phase 8 (Memory)", "File": "08-memory-impact.md", "Optional": False, "PhaseName": "8 (Memory Impact)"},
+        {"Key": phase_display[file_name][0], "Label": phase_display[file_name][1], "File": file_name, "PhaseName": phase_display[file_name][2]}
+        for file_name in phase_rules.PHASE_SEQUENCE
     ]
 
     states: dict[str, ArtifactState] = {}
     for phase in phases:
-        state = get_artifact_state(run_dir / phase["File"], workflow_profile, requirement_ids, actual_changed_files, diff_basis_error)
-        if phase["Optional"] and not state.exists:
-            state.status = "SKIPPED"
-        elif workflow_profile == "legacy" and phase["Key"] in LATE_PHASE_KEYS and not state.exists:
+        state = get_artifact_state(run_dir / phase["File"], requirement_ids, actual_changed_files, diff_basis_error)
+        if phase["File"] in phase_rules.OPTIONAL_PHASES and not state.exists and phase["File"] not in activated_phases:
             state.status = "SKIPPED"
         states[phase["Key"]] = state
 
@@ -2035,24 +1867,21 @@ def main() -> None:
     print(title)
     print("=" * max(8, len(title)))
     print()
-    print(f"Workflow Profile: {workflow_profile}")
-    if workflow_profile in STRICT_WORKFLOW_PROFILES:
-        print("Audit Contract: audited phases must reach Audit: PASS before Coverage/Approval may pass")
-    print()
-    print_phase_status(phases, states, args.show_hashes, run_id, workflow_profile)
+    print_phase_status(phases, states, args.show_hashes, run_id)
 
-    # Next-legal-phase and stale-chain summary using the canonical phase-rules model.
-    phase_rules = load_phase_rules_module()
-    next_legal = phase_rules.get_next_legal_phase(run_dir)
+    # Derive the next legal phase from the same fully validated states used for
+    # Current Phase. The phase-rules module owns ordering and mechanical lock
+    # receipts; semantic ledger and gate validity is owned here.
+    next_legal = current_phase["File"] if current_phase is not None and not activation_issues else None
     stale_entries = phase_rules.get_all_stale_receipts(run_dir)
 
-    if next_legal:
+    if activation_issues:
+        print("Next Legal Phase: BLOCKED")
+        print("  Invalid scheduled phase activation records:")
+        for issue in activation_issues:
+            print(f"    - {issue}")
+    elif next_legal:
         print(f"Next Legal Phase: {next_legal}")
-        prereq_blockers = phase_rules.get_prerequisite_blockers(next_legal, run_dir)
-        if prereq_blockers:
-            print("  Prerequisite blockers:")
-            for blocker in prereq_blockers:
-                print(f"    - {blocker['artifact']}: {blocker['status']}")
     elif current_phase is None:
         print("Next Legal Phase: COMPLETE (all phases locked)")
     else:
@@ -2070,7 +1899,8 @@ def main() -> None:
         print("Status: LOCKED")
     else:
         print(f"Current Phase: {current_phase['PhaseName']}")
-        print(f"Status: {current_state.status}")
+        current_display = "LOCKED*" if current_state.status == "LOCKED" and not current_state.lock_valid else current_state.status
+        print(f"Status: {current_display}")
         if current_state.blockers:
             print("Audit Blockers:")
             for blocker in current_state.blockers:
@@ -2085,32 +1915,24 @@ def main() -> None:
     print(f"  Exists: {'Yes' if evidence_dir.exists() else 'No'}")
     print(f"  Files:  {evidence_files}")
 
-    if workflow_profile in STRICT_WORKFLOW_PROFILES:
-        print()
-        print("Diff Audit:")
-        if diff_basis_error:
-            print(f"  Status: blocked - {diff_basis_error}")
-        else:
-            print(f"  Changed files reviewed from git diff basis: {len(actual_changed_files or [])}")
+    print()
+    print("Diff Audit:")
+    if diff_basis_error:
+        print(f"  Status: blocked - {diff_basis_error}")
+    else:
+        print(f"  Changed files reviewed from git diff basis: {len(actual_changed_files or [])}")
 
     print()
     print("Next Steps:")
     if current_phase is None:
-        if workflow_profile == "legacy":
-            print("  1. Legacy run is complete under the pre-Phase-8 workflow contract.")
-            print("  2. If you resume this run under the new workflow, add `Workflow version: recursive-mode-audit-v2` and continue with the stricter audited closeout.")
-        elif workflow_profile == COMPAT_WORKFLOW_PROFILE:
-            print("  1. Compatibility run is complete through Phase 8.")
-            print("  2. Use `Workflow version: recursive-mode-audit-v2` for new runs that should enforce the stronger audit loop.")
-        else:
-            print("  1. Run is complete through audited Phase 8.")
-            print("  2. Merge the worktree branch when ready.")
+        print("  1. Run is complete through audited Phase 8.")
+        print("  2. Merge the worktree branch when ready.")
     else:
         next_artifact = f".recursive/run/{run_id}/{current_phase['File']}"
-        if workflow_profile in STRICT_WORKFLOW_PROFILES and current_phase["File"] in AUDITED_PHASE_FILES:
+        if current_phase["File"] in AUDITED_PHASE_FILES:
             print(f"  1. Update {next_artifact} so the audit sections are complete and grounded in upstream artifacts plus the recorded diff basis.")
             print("  2. Repair any in-scope gaps or unexplained drift, then rerun the audit.")
-            print("  3. Only after `Audit: PASS` may Coverage/Approval pass and the phase lock.")
+            print("  3. Only after whole-ledger PASS may Coverage/Approval pass and the phase lock.")
         else:
             print(f"  1. Complete {next_artifact}.")
             print("  2. Pass the required gates and lock the artifact before advancing.")

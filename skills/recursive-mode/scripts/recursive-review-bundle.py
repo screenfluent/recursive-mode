@@ -13,11 +13,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-TRANSIENT_RUNTIME_DIR_MARKERS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".tox", ".nox"}
-TRANSIENT_RUNTIME_FILE_NAMES = {".ds_store", "thumbs.db"}
-TRANSIENT_RUNTIME_SUFFIXES = (".pyc", ".pyo", ".pyd")
+import recursive_phase_rules as phase_rules
+import recursive_review_ledger as review_ledger
+import recursive_review_surface as review_surface
+
 DIFF_BASIS_ALLOWED_TYPES = {"local commit", "local branch", "remote ref", "merge-base derived"}
 WORKING_TREE_COMPARISON_REFS = {"working-tree", "working-tree@head", "worktree", "working-tree+head"}
+RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def trim_md_value(value: str) -> str:
@@ -30,11 +32,6 @@ def get_md_field_value(content: str, field_name: str) -> str | None:
     if not match:
         return None
     return trim_md_value(match.group(1))
-
-
-def content_sha256(content: str) -> str:
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def run_git(repo_root: Path, *args: str) -> tuple[str | None, str | None]:
@@ -205,73 +202,8 @@ def normalize_diff_basis(repo_root: Path, diff_basis: dict[str, str | None]) -> 
     }, None
 
 
-def get_git_changed_files(repo_root: Path, diff_basis: dict[str, str | None]) -> tuple[list[str] | None, str | None]:
-    normalized_basis, basis_error = normalize_diff_basis(repo_root, diff_basis)
-    if basis_error:
-        return None, basis_error
-
-    try:
-        diff_result = subprocess.run(
-            ["git", "-C", str(repo_root), *normalized_basis["git_args"]],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        untracked_result = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "--others", "--exclude-standard"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as exc:
-        return None, f"Unable to execute git: {exc}"
-
-    if diff_result.returncode != 0:
-        message = diff_result.stderr.strip() or diff_result.stdout.strip() or "git diff failed"
-        return None, message
-    if untracked_result.returncode != 0:
-        message = untracked_result.stderr.strip() or untracked_result.stdout.strip() or "git ls-files failed"
-        return None, message
-
-    tracked_changed = [path.strip() for path in diff_result.stdout.splitlines() if path.strip()]
-    untracked_changed = [
-        path.strip()
-        for path in untracked_result.stdout.splitlines()
-        if path.strip() and not is_transient_runtime_path(path.strip())
-    ]
-    changed = tracked_changed + untracked_changed
-    return sorted(set(path.strip() for path in changed if path.strip())), None
-
-
 def normalize_repo_path(raw_path: str) -> str:
     return raw_path.replace("\\", "/").strip().lstrip("/")
-
-
-def is_transient_runtime_path(normalized_path: str) -> bool:
-    candidate = normalize_repo_path(normalized_path)
-    if not candidate:
-        return False
-    parts = Path(candidate).parts
-    if any(part in TRANSIENT_RUNTIME_DIR_MARKERS for part in parts):
-        return True
-    file_name = Path(candidate).name.lower()
-    if file_name in TRANSIENT_RUNTIME_FILE_NAMES:
-        return True
-    return file_name.endswith(TRANSIENT_RUNTIME_SUFFIXES)
-
-
-def filter_runtime_changed_files(paths: list[str], run_id: str) -> list[str]:
-    filtered: list[str] = []
-    for raw_path in paths:
-        normalized = normalize_repo_path(raw_path)
-        if not normalized:
-            continue
-        if normalized.startswith(f".recursive/run/{run_id}/"):
-            continue
-        if is_transient_runtime_path(normalized):
-            continue
-        filtered.append(normalized)
-    return sorted(set(filtered))
 
 
 def get_stage_local_addenda_paths(run_dir: Path, artifact_name: str) -> list[Path]:
@@ -371,17 +303,25 @@ def main() -> int:
     parser.add_argument("--code-ref", action="append", default=[], help="Repo-relative code file to inspect. Repeat as needed.")
     parser.add_argument("--evidence-ref", action="append", default=[], help="Repo-relative evidence artifact path. Repeat as needed.")
     parser.add_argument("--audit-question", action="append", default=[], help="Audit or review question. Repeat as needed.")
-    parser.add_argument("--required-output", action="append", default=[], help="Required output bullet. Repeat as needed.")
+    parser.add_argument("--review-id", default="", help="Stable kebab-case review identifier used for the finding ledger.")
+    parser.add_argument("--pass", dest="pass_id", required=True, help="Positive zero-padded review pass ID.")
     parser.add_argument("--routing-config-path", default="", help="Repo-relative routing policy path for routed delegation.")
     parser.add_argument("--routing-discovery-path", default="", help="Repo-relative routing discovery path for routed delegation.")
     parser.add_argument("--routed-cli", default="", help="Resolved routed CLI id if applicable.")
     parser.add_argument("--routed-model", default="", help="Resolved routed model id if applicable.")
-    parser.add_argument("--output-name", default="", help="Optional bundle filename under evidence/review-bundles/.")
     parser.add_argument("--no-auto-addenda", action="store_true", help="Disable automatic addenda discovery for upstream artifacts and the current phase.")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    run_dir = repo_root / ".recursive" / "run" / args.run_id.strip()
+    run_id = args.run_id.strip()
+    if not RUN_ID_RE.fullmatch(run_id):
+        print("[FAIL] Run ID must be a canonical kebab-case directory name.")
+        return 1
+    run_root = repo_root / ".recursive" / "run"
+    run_dir = run_root / run_id
+    if run_dir.is_symlink() or run_dir.resolve().parent != run_root.resolve():
+        print("[FAIL] Resolved run directory must remain directly beneath the repository run root.")
+        return 1
     if not run_dir.exists():
         print(f"[FAIL] Run directory not found: {run_dir}")
         return 1
@@ -391,13 +331,6 @@ def main() -> int:
     if diff_basis_error:
         print(f"[FAIL] {diff_basis_error}")
         return 1
-    changed_files, diff_error = get_git_changed_files(repo_root, diff_basis)
-    if diff_error:
-        print(f"[FAIL] {diff_error}")
-        return 1
-
-    filtered_changed_files = filter_runtime_changed_files(changed_files or [], run_dir.name)
-
     artifact_path = normalize_repo_path(args.artifact_path)
     upstream_artifacts = [normalize_repo_path(item) for item in args.upstream_artifact]
     addenda = [normalize_repo_path(item) for item in args.addendum]
@@ -416,41 +349,96 @@ def main() -> int:
     routing_config_path = normalize_repo_path(args.routing_config_path) if args.routing_config_path.strip() else ""
     routing_discovery_path = normalize_repo_path(args.routing_discovery_path) if args.routing_discovery_path.strip() else ""
     audit_questions = [item.strip() for item in args.audit_question if item.strip()]
-    required_output = [item.strip() for item in args.required_output if item.strip()]
+    try:
+        surface_snapshot = review_surface.capture(
+            repo_root,
+            run_id=run_dir.name,
+            baseline=normalized_diff_basis["normalized_baseline"],
+            comparison=normalized_diff_basis["normalized_comparison"],
+            references=[
+                *upstream_artifacts,
+                *addenda,
+                *prior_refs,
+                *control_docs,
+                *code_refs,
+                *evidence_refs,
+                *([routing_config_path] if routing_config_path else []),
+                *([routing_discovery_path] if routing_discovery_path else []),
+            ],
+        )
+    except (OSError, ValueError) as exc:
+        print(f"[FAIL] Unable to snapshot reviewed surface: {exc}")
+        return 1
+    filtered_changed_files = [record["path"] for record in surface_snapshot["changed"]]
+    artifact_file = Path(artifact_path).name
+    registered_phase_key = phase_rules.audited_phase_key(artifact_file)
+    if registered_phase_key is None:
+        print(f"[FAIL] artifact is not in the audited registry: {artifact_file}")
+        return 1
+    if phase_rules.audited_phase_key_from_label(args.phase) != registered_phase_key:
+        print(f"[FAIL] phase label does not match audited artifact: {args.phase.strip()} != {artifact_file}")
+        return 1
+    if artifact_path != f".recursive/run/{run_dir.name}/{artifact_file}":
+        print(f"[FAIL] Artifact Path must be the canonical receipt for run {run_dir.name}: /{artifact_path}")
+        return 1
+    review_id = args.review_id.strip() or slugify(f"{args.phase}-{args.role}")
+    ledger_rel = ""
+    pass_id = args.pass_id.strip()
+    if not re.fullmatch(r"[0-9]{4}", pass_id) or pass_id == "0000":
+        print("[FAIL] review bundle requires --pass as a positive zero-padded four-digit ID.")
+        return 1
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", review_id):
+        print("[FAIL] Review ID must be a kebab-case identifier.")
+        return 1
+    selected_phase_key = registered_phase_key
+    ledger_rel = f".recursive/run/{run_dir.name}/evidence/reviews/{selected_phase_key}/{review_id}/ledger.md"
+    duplicates = [
+        path
+        for path in run_dir.glob(f"evidence/reviews/*/{review_id}/ledger.md")
+        if normalize_repo_path(str(path.relative_to(repo_root))) != ledger_rel
+    ]
+    if duplicates:
+        print(f"[FAIL] Review ID must be globally unique within the run: {review_id}")
+        return 1
+    bundle_duplicates = [
+        path
+        for path in run_dir.glob(f"evidence/review-bundles/*/{review_id}")
+        if path.is_dir() and path.parent.name != selected_phase_key
+    ]
+    if bundle_duplicates:
+        print(f"[FAIL] Review ID must be globally unique within the run: {review_id}")
+        return 1
 
-    if not required_output:
-        required_output = [
-            "Findings ordered by severity",
-            "Requirement and plan alignment assessment",
-            "Diff reconciliation summary",
-            "Explicit verdict and repair recommendation",
-        ]
-
-    bundle_name = args.output_name.strip()
-    if not bundle_name:
-        bundle_name = f"{slugify(args.phase)}-{slugify(args.role)}.md"
-    if not bundle_name.lower().endswith(".md"):
-        bundle_name = f"{bundle_name}.md"
-
-    bundle_dir = run_dir / "evidence" / "review-bundles"
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path = bundle_dir / bundle_name
+    bundle_path = run_dir / "evidence/review-bundles" / registered_phase_key / review_id / f"{pass_id}.md"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
     bundle_rel = normalize_repo_path(str(bundle_path.relative_to(repo_root)))
-    artifact_content_hash = content_sha256((repo_root / artifact_path).read_text(encoding="utf-8"))
+    artifact_bytes = (repo_root / artifact_path).read_bytes()
+    artifact_content = artifact_bytes.decode("utf-8")
+    artifact_content_hash = hashlib.sha256(artifact_bytes).hexdigest()
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = [
         f"Run: `/.recursive/run/{run_dir.name}/`",
-        f"Phase: `{args.phase.strip()}`",
+        f"Phase: `{artifact_file}`",
+        f"Phase Key: `{registered_phase_key}`",
+        f"Review ID: `{review_id}`",
+        f"Pass: `{pass_id}`",
         f"Role: `{args.role.strip()}`",
         f"Bundle Path: `/{bundle_rel}`",
         f"Artifact Path: `/{artifact_path}`",
         f"Artifact Content Hash: `{artifact_content_hash}`",
+    ]
+    lines.extend([
+        f"Audit Payload Hash: `{review_ledger.audit_payload_hash(artifact_content)}`",
+        f"Audit Payload Profile: `{review_ledger.AUDIT_PAYLOAD_PROFILE}`",
+        f"Review Ledger Path: `/{ledger_rel}`",
+    ])
+    lines.extend([
         f"GeneratedAt: `{generated_at}`",
         "",
         "## Bundle Scope",
         "- Canonical delegated review bundle for recursive-mode audit/review work.",
-        "- Regenerate this bundle if the draft, changed files, or required evidence changes materially before review.",
+        "- Regenerate this bundle after any change to the reviewed diff, artifact, or evidence basis.",
         "",
         "## Routing",
         f"- Routed CLI: `{args.routed_cli.strip() or 'none'}`",
@@ -466,8 +454,10 @@ def main() -> int:
         f"- Normalized comparison: `{normalized_diff_basis['normalized_comparison']}`",
         f"- Normalized diff command: `{normalized_diff_basis['normalized_diff_command']}`",
         "",
-    ]
+    ])
     lines.extend(render_list("## Changed Files Reviewed", filtered_changed_files))
+    lines.append("")
+    lines.extend(review_surface.render(surface_snapshot))
     lines.append("")
     lines.extend(render_list("## Upstream Artifacts To Re-read", upstream_artifacts))
     lines.append("")
@@ -483,14 +473,30 @@ def main() -> int:
     lines.append("")
     lines.extend(render_list("## Audit Questions", audit_questions))
     lines.append("")
-    lines.extend(render_list("## Required Output", required_output))
-    lines.append("")
+    lines.extend([
+        "## Required Output",
+        "- Follow `/.agents/skills/recursive-review/references/finding-protocol.md`.",
+        "- Use exactly these top-level sections in order: `## Review Scope`, `## Findings`, `## Verdict`.",
+        "- Put every technical issue under `## Findings` as an append-only stable `F-*` record; emit no finding-bearing free prose.",
+        "- Create new findings with `Disposition: open`; a reviewer or repair agent cannot assign a terminal disposition.",
+        "- A repair agent records only structured claims; the controller verifies each row against the repository before closure.",
+        f"- Read and update the canonical ledger at `/{ledger_rel}`.",
+        "",
+    ])
     lines.append("## Notes")
-    lines.append("- Review output is invalid if it does not cite the upstream artifacts, diff basis, changed files, and final verdict.")
+    lines.append(
+        "- Review output is invalid if it does not cite the upstream artifacts, diff basis, changed files, and whole-ledger verdict."
+    )
     lines.append("- If this bundle is incomplete, reject delegation and perform the audit as self-audit.")
     lines.append("")
 
-    bundle_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    bundle_content = "\n".join(lines)
+    try:
+        with bundle_path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(bundle_content)
+    except FileExistsError:
+        print(f"[FAIL] Refusing to overwrite immutable review bundle: /{bundle_rel}")
+        return 1
 
     print(f"[OK] Wrote review bundle: /{bundle_rel}")
     print(f"Changed files: {len(filtered_changed_files)}")

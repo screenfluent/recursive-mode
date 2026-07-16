@@ -13,6 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = REPO_ROOT / "skills" / "recursive-mode" / "scripts"
+sys.path.insert(0, str(SCRIPT_DIR))
 
 
 def load_module(module_name: str, filename: str):

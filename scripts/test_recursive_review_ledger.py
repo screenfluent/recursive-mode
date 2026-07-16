@@ -538,6 +538,106 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
         result = ledger.validate_ledger(self.root, standalone_ledger)
         self.assertTrue(any("standalone" in issue.lower() and "scheduled" in issue.lower() for issue in result.issues))
 
+    def test_pending_handoff_activates_absent_optional_owner_without_precreation(self) -> None:
+        fixture = ReviewLedgerFixture(self.root, "active-optional-owner")
+        owner = "04-test-summary.md"
+        owner_phase_key = phase_rules.audited_phase_key(owner)
+        self.assertIsNotNone(owner_phase_key)
+        destination = f"/.recursive/run/{fixture.run_id}/evidence/reviews/scheduled/{owner_phase_key}/inventory.md"
+        scheduled = {"owner": owner, "basis": "`/.recursive/RECURSIVE.md` assigns planned suite execution to Phase 4", "destination": destination}
+        fixture.write_terminal(findings=fixture.finding(disposition="scheduled", kind="test-gap", scheduled=scheduled), pending="F-001")
+        fixture.write_handoff("F-001", owner=owner, create_owner=False, kind="test-gap", basis=scheduled["basis"])
+
+        self.assertFalse((fixture.run / owner).exists())
+        result = ledger.validate_phase_artifact(self.root, fixture.run, fixture.artifact)
+        self.assertTrue(result.valid, result.issues)
+        active, active_issues = ledger.get_active_scheduled_owner_phases(self.root, fixture.run)
+        self.assertEqual(active_issues, [])
+        self.assertEqual(active, {owner})
+
+        for artifact in phase_rules.PHASE_SEQUENCE[: phase_rules.phase_index(owner)]:
+            if artifact in phase_rules.OPTIONAL_PHASES and artifact != "03.5-code-review.md":
+                continue
+            self.lock_artifact(fixture.run / artifact)
+        self.assertEqual(phase_rules.get_next_legal_phase(fixture.run, activated_phases=active), owner)
+        blockers = phase_rules.get_prerequisite_blockers("06-decisions-update.md", fixture.run, activated_phases=active)
+        self.assertTrue(any(item["artifact"] == owner and item["status"] == "MISSING" for item in blockers), blockers)
+        status = subprocess.run([sys.executable, str(RUNTIME / "recursive-status.py"), "--repo-root", str(self.root), "--run-id", fixture.run_id], text=True, capture_output=True, check=False)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("Next Legal Phase: 00-requirements.md", status.stdout)
+        self.assertIn("Current Phase: 0 (Requirements)", status.stdout)
+        self.assertIn("Status: LOCKED*", status.stdout)
+        later = fixture.run / "06-decisions-update.md"
+        later.write_text("# Premature Phase 6 scaffold\n", encoding="utf-8")
+        lock = subprocess.run([sys.executable, str(RUNTIME / "recursive-lock.py"), "--repo-root", str(self.root), "--run-id", fixture.run_id, "--artifact", later.name], text=True, capture_output=True, check=False)
+        self.assertNotEqual(lock.returncode, 0)
+        self.assertIn(f"{owner}: MISSING", lock.stdout)
+
+        handoff = self.root / destination.lstrip("/")
+        valid_handoff = handoff.read_text(encoding="utf-8")
+        handoff.write_text(valid_handoff.replace("# Scheduled Finding Handoff Inventory\n", "# Scheduled Finding Handoff Inventory\nmalformed prose\n"), encoding="utf-8")
+        active, active_issues = ledger.get_active_scheduled_owner_phases(self.root, fixture.run)
+        self.assertEqual(active, set())
+        self.assertTrue(any("outside record schema" in issue for issue in active_issues), active_issues)
+        blocked_status = subprocess.run(
+            [sys.executable, str(RUNTIME / "recursive-status.py"), "--repo-root", str(self.root), "--run-id", fixture.run_id],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(blocked_status.returncode, 0, blocked_status.stderr)
+        self.assertIn("Next Legal Phase: BLOCKED", blocked_status.stdout)
+
+    def test_lint_status_lock_and_verify_consume_the_shared_validator(self) -> None:
+        self.fixture.write_terminal()
+        ledger_path = self.fixture.review / "ledger.md"
+        ledger_path.write_text(ledger_path.read_text(encoding="utf-8").replace("Verified Pass Hash: ", "Verified Pass Hash: bad"), encoding="utf-8")
+        lint = load_module(RUNTIME / "lint-recursive-run.py", "slice2_lint")
+        status = load_module(RUNTIME / "recursive-status.py", "slice2_status")
+        lock = load_module(RUNTIME / "recursive-lock.py", "slice2_lock")
+        verify = load_module(RUNTIME / "verify-locks.py", "slice2_verify")
+        content = self.fixture.artifact.read_text(encoding="utf-8")
+
+        lint_issues = lint.lint_phase_specific_rules(self.fixture.artifact, content, self.fixture.run, self.root, [], [])
+        self.assertTrue(any("Recursive review" in issue for issue in lint_issues))
+        status_issues = status.collect_phase_specific_blockers("03.5-code-review.md", content, self.fixture.run, self.root, [], [])
+        self.assertTrue(any("Recursive review" in issue for issue in status_issues))
+        lock_issues, _content = lock.validate_lockable(lint, self.root, self.fixture.run, self.fixture.artifact)
+        self.assertTrue(any("Recursive review" in issue for issue in lock_issues))
+        for artifact in phase_rules.get_prerequisites("04-test-summary.md", self.fixture.run):
+            self.lock_artifact(self.fixture.run / artifact)
+        semantic_blockers = lock.get_semantic_prerequisite_blockers(
+            phase_rules,
+            lint,
+            self.root,
+            self.fixture.run,
+            "04-test-summary.md",
+            frozenset(),
+        )
+        self.assertTrue(
+            any(blocker["artifact"] == "03.5-code-review.md" and blocker["status"] == "INVALID" for blocker in semantic_blockers),
+            semantic_blockers,
+        )
+        verify_issues = verify.collect_recursive_review_issues(self.root, self.fixture.run, "03.5-code-review.md", content)
+        self.assertTrue(any("Recursive review" in issue for issue in verify_issues))
+
+    def test_verify_fix_does_not_rehash_phase_with_invalid_ledger(self) -> None:
+        self.fixture.write_terminal()
+        ledger_path = self.fixture.review / "ledger.md"
+        ledger_path.write_text(ledger_path.read_text(encoding="utf-8").replace("Verified Pass Hash: ", "Verified Pass Hash: bad"), encoding="utf-8")
+        content = self.fixture.artifact.read_text(encoding="utf-8")
+        content = "Status: `LOCKED`\nLockedAt: `2026-07-12T00:00:00Z`\nLockHash: `" + ("0" * 64) + "`\n" + content + "\nCoverage: PASS\nApproval: PASS\n"
+        self.fixture.artifact.write_text(content, encoding="utf-8")
+        before = self.fixture.artifact.read_bytes()
+        result = subprocess.run([sys.executable, str(RUNTIME / "verify-locks.py"), "--repo-root", str(self.root), "--run-id", "demo", "--fix"], text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.fixture.artifact.read_bytes(), before)
+
+    def test_audit_payload_ignores_lock_metadata_insertion(self) -> None:
+        draft = "Status: `DRAFT`\n\n## TODO\n\n- [x] reviewed\n\nCoverage: PASS\nApproval: PASS\n"
+        locked = "Status: `LOCKED`\nLockedAt: `2026-07-12T00:00:00Z`\nLockHash: `" + ("a" * 64) + "`\n\n## TODO\n\n- [x] reviewed\n\nCoverage: PASS\nApproval: PASS\n"
+        self.assertEqual(ledger.audit_payload_hash(draft), ledger.audit_payload_hash(locked))
+
 
 
 if __name__ == "__main__":

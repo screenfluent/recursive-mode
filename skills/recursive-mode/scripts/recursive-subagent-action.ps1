@@ -22,6 +22,10 @@ param(
     [string[]]$ArtifactRead = @(),
     [string[]]$ArtifactUpdated = @(),
     [string[]]$EvidenceUsed = @(),
+    [string]$ReviewLedger = "",
+    [string[]]$FindingClaim = @(),
+    [string[]]$FindingChange = @(),
+    [string[]]$FindingVerification = @(),
     [string[]]$Finding = @(),
     [string[]]$VerificationPath = @(),
     [string[]]$VerificationItem = @(),
@@ -62,6 +66,7 @@ $argsList = @(
 
 if ($ArtifactPath) { $argsList += @("--artifact-path", $ArtifactPath) }
 if ($ReviewBundle) { $argsList += @("--review-bundle", $ReviewBundle) }
+if ($ReviewLedger) { $argsList += @("--review-ledger", $ReviewLedger) }
 if ($DiffBasis) { $argsList += @("--diff-basis", $DiffBasis) }
 if ($OutputName) { $argsList += @("--output-name", $OutputName) }
 if ($RouterUsed) { $argsList += @("--router-used", $RouterUsed) }
@@ -89,6 +94,9 @@ foreach ($value in @($UntouchedFile)) { foreach ($piece in ($value -split ",")) 
 foreach ($value in @($ArtifactRead)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--artifact-read", $piece.Trim()) } } }
 foreach ($value in @($ArtifactUpdated)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--artifact-updated", $piece.Trim()) } } }
 foreach ($value in @($EvidenceUsed)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--evidence-used", $piece.Trim()) } } }
+foreach ($value in @($FindingClaim)) { if ($value.Trim()) { $argsList += @("--finding-claim", $value.Trim()) } }
+foreach ($value in @($FindingChange)) { if ($value.Trim()) { $argsList += @("--finding-change", $value.Trim()) } }
+foreach ($value in @($FindingVerification)) { if ($value.Trim()) { $argsList += @("--finding-verification", $value.Trim()) } }
 foreach ($value in @($Finding)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--finding", $piece.Trim()) } } }
 foreach ($value in @($VerificationPath)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--verification-path", $piece.Trim()) } } }
 foreach ($value in @($VerificationItem)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--verification-item", $piece.Trim()) } } }

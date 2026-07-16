@@ -12,12 +12,12 @@ param(
     [string[]]$CodeRef = @(),
     [string[]]$EvidenceRef = @(),
     [string[]]$AuditQuestion = @(),
-    [string[]]$RequiredOutput = @(),
+    [string]$ReviewId = "",
+    [Parameter(Mandatory = $true)][string]$ReviewPass,
     [string]$RoutingConfigPath = "",
     [string]$RoutingDiscoveryPath = "",
     [string]$RoutedCli = "",
     [string]$RoutedModel = "",
-    [string]$OutputName = "",
     [switch]$NoAutoAddenda
 )
 
@@ -39,7 +39,8 @@ $argsList = @(
     "--role", $Role,
     "--artifact-path", $ArtifactPath
 )
-if ($OutputName) { $argsList += @("--output-name", $OutputName) }
+if ($ReviewId) { $argsList += @("--review-id", $ReviewId) }
+$argsList += @("--pass", $ReviewPass)
 if ($NoAutoAddenda.IsPresent) { $argsList += "--no-auto-addenda" }
 foreach ($value in @($UpstreamArtifact)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--upstream-artifact", $piece.Trim()) } } }
 foreach ($value in @($Addendum)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--addendum", $piece.Trim()) } } }
@@ -48,7 +49,6 @@ foreach ($value in @($ControlDoc)) { foreach ($piece in ($value -split ",")) { i
 foreach ($value in @($CodeRef)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--code-ref", $piece.Trim()) } } }
 foreach ($value in @($EvidenceRef)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--evidence-ref", $piece.Trim()) } } }
 foreach ($value in @($AuditQuestion)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--audit-question", $piece.Trim()) } } }
-foreach ($value in @($RequiredOutput)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--required-output", $piece.Trim()) } } }
 if ($RoutingConfigPath) { $argsList += @("--routing-config-path", $RoutingConfigPath) }
 if ($RoutingDiscoveryPath) { $argsList += @("--routing-discovery-path", $RoutingDiscoveryPath) }
 if ($RoutedCli) { $argsList += @("--routed-cli", $RoutedCli) }

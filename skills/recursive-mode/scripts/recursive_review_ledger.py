@@ -201,12 +201,18 @@ def normalize_audit_payload(content: str) -> str:
         elif section == "Review Metadata" and review_metadata_occurrences == 1:
             candidate_fields = tuple(REVIEW_METADATA_FIELDS)
         replaced = line
-        for field in candidate_fields:
-            replaced = re.sub(
-                rf"^(?P<prefix>[ \t]*(?:[-*][ \t]+)?){re.escape(field)}:[^\n]*(?P<newline>\n?)$",
-                rf"\g<prefix>{field}:\g<newline>",
-                replaced,
-            )
+        if section == "header":
+            for field in candidate_fields:
+                if re.fullmatch(rf"[ \t]*(?:[-*][ \t]+)?{re.escape(field)}:[^\n]*(?:\n)?", replaced):
+                    replaced = ""
+                    break
+        else:
+            for field in candidate_fields:
+                replaced = re.sub(
+                    rf"^(?P<prefix>[ \t]*(?:[-*][ \t]+)?){re.escape(field)}:[^\n]*(?P<newline>\n?)$",
+                    rf"\g<prefix>{field}:\g<newline>",
+                    replaced,
+                )
         for gate in ("Audit", "Coverage", "Approval"):
             replaced = re.sub(
                 rf"^(?P<prefix>[ \t]*(?:[-*][ \t]+)?){gate}:[ \t]*(?:PASS|FAIL)[ \t]*(?P<newline>\n?)$",

@@ -10,6 +10,9 @@ from __future__ import annotations
 import argparse
 import importlib.util
 from pathlib import Path
+
+
+EVIDENCE_SUBDIRECTORIES = ("screenshots", "logs", "perf", "traces", "reviews", "review-bundles", "router", "other")
 import re
 import subprocess
 import sys
@@ -133,7 +136,6 @@ def requirements_content(run_id: str, template: str, from_issue: str) -> str:
     return f"""Run: `/.recursive/run/{run_id}/`
 Phase: `00 Requirements`
 Status: `DRAFT`
-Workflow version: `recursive-mode-audit-v2`
 Inputs:
 {inputs_block}
 Outputs:
@@ -311,7 +313,7 @@ def main() -> None:
 
     evidence_dir = run_dir / "evidence"
     ensure_directory(evidence_dir)
-    for sub in ("screenshots", "logs", "perf", "traces", "review-bundles", "router", "other"):
+    for sub in EVIDENCE_SUBDIRECTORIES:
         ensure_directory(evidence_dir / sub)
 
     requirements_path = run_dir / "00-requirements.md"

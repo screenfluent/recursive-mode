@@ -185,23 +185,29 @@ def is_lock_valid(artifact_path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def get_prerequisites(artifact_file: str, run_dir: Path) -> list[str]:
+def get_prerequisites(
+    artifact_file: str,
+    run_dir: Path,
+    activated_phases: frozenset[str] | set[str] = frozenset(),
+) -> list[str]:
     """
     Return the ordered list of phase artifact file names that must be LOCKED
     before ``artifact_file`` may be scaffolded or locked.
 
-    The rule is simple: every phase that appears earlier in PHASE_SEQUENCE AND
-    is already present on disk in ``run_dir`` must be LOCKED first.  Optional
-    phases that have not been created yet are not prerequisites.
+    Every earlier phase already present on disk, plus every phase activated by
+    a validated external owner contract, must be LOCKED first. Optional phases
+    that are neither present nor activated remain skippable.
     """
     idx = phase_index(artifact_file)
     if idx <= 0:
         return []
-    return [phase for phase in PHASE_SEQUENCE[:idx] if (run_dir / phase).exists()]
+    return [phase for phase in PHASE_SEQUENCE[:idx] if (run_dir / phase).exists() or phase in activated_phases]
 
 
 def get_prerequisite_blockers(
-    artifact_file: str, run_dir: Path
+    artifact_file: str,
+    run_dir: Path,
+    activated_phases: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """
     Return a list of prerequisite artifacts that are currently blocking
@@ -213,7 +219,7 @@ def get_prerequisite_blockers(
       "path"     – absolute path as string
     """
     blockers: list[dict[str, str]] = []
-    for prereq in get_prerequisites(artifact_file, run_dir):
+    for prereq in get_prerequisites(artifact_file, run_dir, activated_phases):
         prereq_path = run_dir / prereq
         status = get_lock_status(prereq_path)
         if status != "LOCKED":
@@ -227,25 +233,28 @@ def get_prerequisite_blockers(
     return blockers
 
 
-def get_next_legal_phase(run_dir: Path) -> str | None:
+def get_next_legal_phase(
+    run_dir: Path,
+    activated_phases: frozenset[str] | set[str] = frozenset(),
+) -> str | None:
     """
     Return the file name of the first phase in PHASE_SEQUENCE that is not yet
     LOCKED and whose prerequisites are all LOCKED, or None if the run is
     complete or blocked.
 
     Optional phases that were never created are treated as intentionally
-    skipped — they are invisible to this function unless they exist on disk.
+    skipped unless a validated external owner contract activates them.
     """
     for phase in PHASE_SEQUENCE:
         phase_path = run_dir / phase
         # Optional phases that don't exist were intentionally omitted; skip them.
-        if phase in OPTIONAL_PHASES and not phase_path.exists():
+        if phase in OPTIONAL_PHASES and not phase_path.exists() and phase not in activated_phases:
             continue
         lock_status = get_lock_status(phase_path)
         if lock_status == "LOCKED":
             continue
         # Phase is not locked; check whether prerequisites are satisfied.
-        blockers = get_prerequisite_blockers(phase, run_dir)
+        blockers = get_prerequisite_blockers(phase, run_dir, activated_phases)
         if not blockers:
             return phase
         # Phase (mandatory or existing optional) has unresolved prerequisites.
@@ -275,7 +284,10 @@ def read_receipt(run_dir: Path, artifact_file: str) -> dict | None:
 
 
 def write_receipt(
-    run_dir: Path, artifact_file: str, artifact_path: Path
+    run_dir: Path,
+    artifact_file: str,
+    artifact_path: Path,
+    activated_phases: frozenset[str] | set[str] = frozenset(),
 ) -> dict:
     """
     Write a lock receipt for ``artifact_file`` recording:
@@ -294,7 +306,7 @@ def write_receipt(
     artifact_hash = lock_hash_from_content(content)
 
     prereq_hashes: dict[str, str] = {}
-    for prereq in get_prerequisites(artifact_file, run_dir):
+    for prereq in get_prerequisites(artifact_file, run_dir, activated_phases):
         prereq_path = run_dir / prereq
         if prereq_path.exists():
             prereq_status = get_lock_status(prereq_path)

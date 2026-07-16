@@ -13,6 +13,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import recursive_review_ledger as review_ledger
+import recursive_review_action as review_action
+import recursive_phase_rules as phase_rules_registry
+
 
 def load_phase_rules_module():
     module_path = Path(__file__).with_name("recursive_phase_rules.py")
@@ -27,22 +31,13 @@ def load_phase_rules_module():
     return module
 
 
-CURRENT_WORKFLOW_PROFILE = "recursive-mode-audit-v2"
-STRICT_WORKFLOW_PROFILE = "recursive-mode-audit-v1"
-COMPAT_WORKFLOW_PROFILE = "memory-phase8"
-STRICT_WORKFLOW_PROFILES = {CURRENT_WORKFLOW_PROFILE, STRICT_WORKFLOW_PROFILE}
+def get_active_scheduled_owner_phases(repo_root: Path, run_dir: Path) -> tuple[set[str], list[str]]:
+    """Derive phase activations from controller-valid pending handoff inventories."""
+    return review_ledger.get_active_scheduled_owner_phases(repo_root, run_dir)
+
+
 LATE_PHASE_ARTIFACTS = ["06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"]
-AUDITED_PHASE_FILES = {
-    "01-as-is.md",
-    "01.5-root-cause.md",
-    "02-to-be-plan.md",
-    "03-implementation-summary.md",
-    "03.5-code-review.md",
-    "04-test-summary.md",
-    "06-decisions-update.md",
-    "07-state-update.md",
-    "08-memory-impact.md",
-}
+AUDITED_PHASE_FILES = phase_rules_registry.AUDITED_ARTIFACTS
 PRIOR_RECURSIVE_EVIDENCE_FILES = {
     "01-as-is.md",
     "02-to-be-plan.md",
@@ -77,10 +72,8 @@ AUDIT_REQUIRED_HEADINGS = [
     "Earlier Phase Reconciliation",
     "Subagent Contribution Verification",
     "Worktree Diff Audit",
-    "Gaps Found",
-    "Repair Work Performed",
     "Requirement Completion Status",
-    "Audit Verdict",
+    "Review Metadata",
 ]
 DIFF_BASIS_FIELDS = [
     "Baseline type",
@@ -181,6 +174,17 @@ RUN_ARTIFACT_SEQUENCE = [
     "08-memory-impact.md",
 ]
 REQUIREMENT_ID_RE = re.compile(r"^(R\d+|SRC-\d{3})$")
+TEST_SURFACE_ID_RE = re.compile(r"^TS-\d{3}$")
+TEST_SURFACE_FIELDS = (
+    "Requirement",
+    "Behavior",
+    "Seam",
+    "Level",
+    "Real Dependencies",
+    "Replaced Dependencies",
+    "Expected From",
+)
+TEST_SURFACE_LEVELS = {"unit", "integration", "contract", "e2e"}
 
 
 def write_issue(severity: str, file_path: Path, message: str, remediation_lines: list[str] | None = None) -> None:
@@ -289,24 +293,6 @@ def get_latest_run_directory(run_root: Path) -> Path | None:
     return runs[0]
 
 
-def get_workflow_profile(run_dir: Path) -> str:
-    requirements_path = run_dir / "00-requirements.md"
-    if requirements_path.exists():
-        content = requirements_path.read_text(encoding="utf-8")
-        workflow_version = get_md_field_value(content, "Workflow version")
-        if workflow_version == CURRENT_WORKFLOW_PROFILE:
-            return CURRENT_WORKFLOW_PROFILE
-        if workflow_version == STRICT_WORKFLOW_PROFILE:
-            return STRICT_WORKFLOW_PROFILE
-        if workflow_version == COMPAT_WORKFLOW_PROFILE:
-            return COMPAT_WORKFLOW_PROFILE
-
-    if any((run_dir / artifact).exists() for artifact in LATE_PHASE_ARTIFACTS):
-        return COMPAT_WORKFLOW_PROFILE
-
-    return "legacy"
-
-
 def is_placeholder_only(text: str) -> bool:
     compact = text.strip()
     if not compact:
@@ -392,19 +378,85 @@ def parse_requirement_mapping_entries(section_body: str) -> tuple[dict[str, dict
     return entries, issues
 
 
-def get_run_requirement_ids(run_dir: Path, workflow_profile: str) -> list[str]:
+def parse_test_surface_entries(section_body: str) -> tuple[dict[str, dict[str, str]], list[str]]:
+    entries: dict[str, dict[str, str]] = {}
+    issues: list[str] = []
+    required_fields = set(TEST_SURFACE_FIELDS)
+
+    for raw_line in section_body.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(("-", "*")):
+            continue
+        parts = [trim_md_value(part.strip()) for part in line[1:].strip().split("|") if part.strip()]
+        if not parts:
+            continue
+        surface_id = trim_md_value(parts[0])
+        if not surface_id.startswith("TS-"):
+            continue
+        if not TEST_SURFACE_ID_RE.fullmatch(surface_id):
+            issues.append(f"Test Surface has invalid ID '{surface_id}'; expected TS-NNN")
+            continue
+
+        fields: dict[str, str] = {}
+        field_duplicates: list[str] = []
+        for part in parts[1:]:
+            if ":" not in part:
+                issues.append(f"Test Surface {surface_id} has malformed field '{part}'")
+                continue
+            key, value = part.split(":", 1)
+            key = key.strip()
+            if key in fields:
+                field_duplicates.append(key)
+            fields[key] = trim_md_value(value.strip())
+
+        if surface_id in entries:
+            issues.append(f"Test Surface contains duplicate entry {surface_id}")
+            continue
+        entries[surface_id] = fields
+
+        if field_duplicates:
+            issues.append(
+                f"Test Surface {surface_id} contains duplicate field(s): {', '.join(sorted(set(field_duplicates)))}"
+            )
+
+        missing_fields = sorted(required_fields - set(fields))
+        unexpected_fields = sorted(set(fields) - required_fields)
+        if missing_fields:
+            issues.append(f"Test Surface {surface_id} is missing field(s): {', '.join(missing_fields)}")
+        if unexpected_fields:
+            issues.append(f"Test Surface {surface_id} has unexpected field(s): {', '.join(unexpected_fields)}")
+
+        requirement_id = trim_md_value(fields.get("Requirement", ""))
+        if not re.fullmatch(r"R\d+", requirement_id):
+            issues.append(f"Test Surface {surface_id} has invalid Requirement '{requirement_id}'")
+
+        level = trim_md_value(fields.get("Level", "")).lower()
+        if level not in TEST_SURFACE_LEVELS:
+            issues.append(f"Test Surface {surface_id} has invalid Level '{fields.get('Level', '')}'")
+
+        for field_name in ("Behavior", "Seam", "Expected From"):
+            if not is_meaningful_requirement_field(fields.get(field_name)):
+                issues.append(f"Test Surface {surface_id} is missing {field_name}")
+        for field_name in ("Real Dependencies", "Replaced Dependencies"):
+            value = trim_md_value(fields.get(field_name, ""))
+            if not value or value.lower() in {"...", "tbd", "todo"}:
+                issues.append(f"Test Surface {surface_id} is missing {field_name}")
+
+    return entries, sorted(set(issues))
+
+
+def get_run_requirement_ids(run_dir: Path) -> list[str]:
     requirements_path = run_dir / "00-requirements.md"
     explicit_ids: list[str] = []
     if requirements_path.exists():
         explicit_ids = parse_requirement_ids(requirements_path.read_text(encoding="utf-8"))
-    if workflow_profile == CURRENT_WORKFLOW_PROFILE:
-        phase1_path = run_dir / "01-as-is.md"
-        if phase1_path.exists():
-            inventory_body = get_heading_body(phase1_path.read_text(encoding="utf-8"), "Source Requirement Inventory")
-            if inventory_body:
-                entries, _issues = parse_source_requirement_inventory_entries(inventory_body)
-                if entries:
-                    return sorted(entries.keys(), key=requirement_sort_key)
+    phase1_path = run_dir / "01-as-is.md"
+    if phase1_path.exists():
+        inventory_body = get_heading_body(phase1_path.read_text(encoding="utf-8"), "Source Requirement Inventory")
+        if inventory_body:
+            entries, _issues = parse_source_requirement_inventory_entries(inventory_body)
+            if entries:
+                return sorted(entries.keys(), key=requirement_sort_key)
     return explicit_ids
 
 
@@ -500,6 +552,13 @@ def has_meaningful_value(value: str | None, *, disallowed: set[str] | None = Non
     if not normalized:
         return False
     return normalized.lower() not in (disallowed or set())
+
+
+def is_field_placeholder(value: str | None) -> bool:
+    if value is None:
+        return True
+    normalized = trim_md_value(value).strip()
+    return normalized.startswith("<") and normalized.endswith(">")
 
 
 def collect_subagent_delegation_issues(audit_context: str) -> list[str]:
@@ -902,9 +961,7 @@ def get_expected_effective_input_addenda_paths(run_dir: Path, file_name: str) ->
     return sorted(set(expected_paths))
 
 
-def lint_effective_input_addenda(file_path: Path, content: str, workflow_profile: str, run_dir: Path) -> list[str]:
-    if workflow_profile not in (STRICT_WORKFLOW_PROFILES | {COMPAT_WORKFLOW_PROFILE}):
-        return []
+def lint_effective_input_addenda(file_path: Path, content: str, run_dir: Path) -> list[str]:
     if is_addendum_artifact(file_path.name):
         return []
 
@@ -918,7 +975,7 @@ def lint_effective_input_addenda(file_path: Path, content: str, workflow_profile
     if missing_inputs:
         issues.append(f"Inputs is missing relevant addenda: {', '.join(missing_inputs[:5])}")
 
-    if workflow_profile in STRICT_WORKFLOW_PROFILES and file_path.name in AUDITED_PHASE_FILES:
+    if file_path.name in AUDITED_PHASE_FILES:
         reread_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(content, 'Effective Inputs Re-read'))}
         missing_reread = [path for path in expected_addenda if path not in reread_paths]
         if missing_reread:
@@ -1169,8 +1226,8 @@ def lint_requirement_disposition_fields(
     return issues
 
 
-def lint_source_requirement_inventory(file_path: Path, content: str, workflow_profile: str, run_dir: Path) -> list[str]:
-    if workflow_profile != CURRENT_WORKFLOW_PROFILE or file_path.name != "01-as-is.md":
+def lint_source_requirement_inventory(file_path: Path, content: str, run_dir: Path) -> list[str]:
+    if file_path.name != "01-as-is.md":
         return []
 
     issues: list[str] = []
@@ -1207,10 +1264,7 @@ def lint_source_requirement_inventory(file_path: Path, content: str, workflow_pr
     return sorted(set(issues))
 
 
-def lint_requirement_mapping(content: str, workflow_profile: str, run_dir: Path, repo_root: Path) -> list[str]:
-    if workflow_profile != CURRENT_WORKFLOW_PROFILE:
-        return []
-
+def lint_requirement_mapping(content: str, run_dir: Path, repo_root: Path) -> list[str]:
     issues: list[str] = []
     phase1_path = run_dir / "01-as-is.md"
     requirements_path = run_dir / "00-requirements.md"
@@ -1274,15 +1328,101 @@ def lint_requirement_mapping(content: str, workflow_profile: str, run_dir: Path,
     return sorted(set(issues))
 
 
-def lint_plan_drift_check(content: str, workflow_profile: str) -> list[str]:
-    if workflow_profile != CURRENT_WORKFLOW_PROFILE:
-        return []
+def lint_plan_drift_check(content: str) -> list[str]:
     body = get_heading_body(content, "Plan Drift Check")
     if not body:
         return ["Missing or empty section: ## Plan Drift Check"]
     if re.search(r"\bmerge\b", body, re.IGNORECASE) and not re.search(r"\brationale\b", body, re.IGNORECASE):
         return ["Plan Drift Check mentions merged obligations without explaining why the merge is lossless"]
     return []
+
+
+def get_effective_test_surface_entries(run_dir: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
+    phase2_path = run_dir / "02-to-be-plan.md"
+    if not phase2_path.exists():
+        return {}, ["Test Surface references require existing 02-to-be-plan.md"]
+
+    sources = [phase2_path, *get_stage_local_addenda_paths(run_dir, "02-to-be-plan.md")]
+    effective: dict[str, dict[str, str]] = {}
+    issues: list[str] = []
+    for source in sources:
+        body = get_heading_body(source.read_text(encoding="utf-8"), "Test Surface")
+        if not body:
+            if source == phase2_path:
+                issues.append("Missing or empty section: ## Test Surface")
+            continue
+        entries, entry_issues = parse_test_surface_entries(body)
+        issues.extend(f"{source.name}: {issue}" for issue in entry_issues)
+        # A later plan addendum may deliberately replace a stable TS-* record.
+        effective.update(entries)
+    return effective, sorted(set(issues))
+
+
+def lint_test_surface(
+    file_path: Path,
+    content: str,
+    run_dir: Path,
+    requirement_ids: list[str],
+) -> list[str]:
+    if file_path.name == "02-to-be-plan.md":
+        body = get_heading_body(content, "Test Surface")
+        if not body:
+            return ["Missing or empty section: ## Test Surface"]
+        entries, issues = parse_test_surface_entries(body)
+        known_requirements = {requirement_id for requirement_id in requirement_ids if re.fullmatch(r"R\d+", requirement_id)}
+        cited_requirements = {fields.get("Requirement", "") for fields in entries.values()}
+        unknown = sorted(cited_requirements - known_requirements, key=requirement_sort_key)
+        if unknown:
+            issues.append(f"Test Surface cites unknown requirements: {', '.join(unknown)}")
+
+        completion_body = get_heading_body(content, "Requirement Completion Status")
+        completion_entries, _completion_issues = parse_requirement_completion_entries(completion_body)
+        planned_requirements = {
+            requirement_id
+            for requirement_id, fields in completion_entries.items()
+            if re.fullmatch(r"R\d+", requirement_id)
+            and trim_md_value(fields.get("Status", "")).lower()
+            in {"planned", "planned-via-merge", "planned-indirectly"}
+        }
+        missing = sorted(planned_requirements - cited_requirements, key=requirement_sort_key)
+        if missing:
+            issues.append(f"Test Surface is missing planned requirements: {', '.join(missing)}")
+        return sorted(set(issues))
+
+    if file_path.name != "03-implementation-summary.md":
+        return []
+
+    tdd_body = get_heading_body(content, "TDD Compliance Log")
+    tdd_mode = trim_md_value(get_md_field_value(tdd_body, "TDD Mode") or "").lower()
+    if tdd_mode not in TDD_MODES:
+        return []
+
+    planned_entries, issues = get_effective_test_surface_entries(run_dir)
+    planned_ids = set(planned_entries)
+    known_requirements = {requirement_id for requirement_id in requirement_ids if re.fullmatch(r"R\d+", requirement_id)}
+    effective_requirements = {fields.get("Requirement", "") for fields in planned_entries.values()}
+    unknown_requirements = sorted(effective_requirements - known_requirements, key=requirement_sort_key)
+    if unknown_requirements:
+        issues.append(
+            f"Phase 3 effective Test Surface cites unknown requirements: {', '.join(unknown_requirements)}"
+        )
+
+    reference_body = tdd_body
+    if tdd_mode == "pragmatic":
+        reference_body += "\n" + get_heading_body(content, "Pragmatic TDD Exception")
+    reference_lines = re.findall(r"(?mi)^[ \t]*(?:[-*][ \t]+)?Test Surface:\s*(.+)$", reference_body)
+    referenced_ids = {
+        surface_id
+        for line in reference_lines
+        for surface_id in re.findall(r"\bTS-\d{3}\b", line)
+    }
+    unknown = sorted(referenced_ids - planned_ids)
+    if unknown:
+        issues.append(f"Phase 3 cites unknown Test Surface IDs: {', '.join(unknown)}")
+    missing = sorted(planned_ids - referenced_ids)
+    if missing:
+        issues.append(f"Phase 3 is missing planned Test Surface references: {', '.join(missing)}")
+    return sorted(set(issues))
 
 
 def lint_phase2_requirement_disposition_fields(
@@ -1377,10 +1517,9 @@ def lint_requirement_completion_status(
     content: str,
     requirement_ids: list[str],
     run_dir: Path,
-    workflow_profile: str,
     actual_changed_files: list[str] | None,
 ) -> list[str]:
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_path.name not in AUDITED_PHASE_FILES:
+    if file_path.name not in AUDITED_PHASE_FILES:
         return []
 
     body = get_heading_body(content, "Requirement Completion Status")
@@ -1392,7 +1531,7 @@ def lint_requirement_completion_status(
     if missing:
         issues.append(f"Requirement Completion Status is missing in-scope requirements: {', '.join(missing)}")
 
-    if workflow_profile == CURRENT_WORKFLOW_PROFILE and file_path.name == "02-to-be-plan.md":
+    if file_path.name == "02-to-be-plan.md":
         for requirement_id, fields in entries.items():
             status = trim_md_value(fields.get("Status", "")).lower()
             if status not in PHASE2_REQUIREMENT_DISPOSITION_STATUSES:
@@ -1449,8 +1588,8 @@ def lint_requirement_completion_status(
     return sorted(set(issues))
 
 
-def lint_prior_recursive_evidence(content: str, run_dir: Path, workflow_profile: str, repo_root: Path, file_name: str) -> list[str]:
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_name not in PRIOR_RECURSIVE_EVIDENCE_FILES:
+def lint_prior_recursive_evidence(content: str, run_dir: Path, repo_root: Path, file_name: str) -> list[str]:
+    if file_name not in PRIOR_RECURSIVE_EVIDENCE_FILES:
         return []
 
     body = get_heading_body(content, "Prior Recursive Evidence Reviewed")
@@ -1504,9 +1643,20 @@ def lint_subagent_action_record_file(
     repo_root: Path,
     run_dir: Path,
     actual_changed_files: list[str] | None,
+    expected_phase: str | None = None,
+    owning_artifact: str | None = None,
 ) -> list[str]:
     content = file_path.read_text(encoding="utf-8")
     issues: list[str] = []
+    issues.extend(
+        review_action.validate_action_record(
+            repo_root,
+            content,
+            expected_run=run_dir.name,
+            expected_phase=expected_phase,
+            owning_artifact=owning_artifact,
+        ).issues
+    )
 
     if "# Subagent Action Record" not in content:
         issues.append("Missing title: # Subagent Action Record")
@@ -1721,12 +1871,11 @@ def parse_subagent_action_record_claims(action_content: str) -> dict[str, set[st
 def lint_subagent_contribution_verification(
     file_path: Path,
     content: str,
-    workflow_profile: str,
     run_dir: Path,
     repo_root: Path,
     actual_changed_files: list[str] | None,
 ) -> list[str]:
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_path.name not in AUDITED_PHASE_FILES:
+    if file_path.name not in AUDITED_PHASE_FILES:
         return []
 
     body = get_heading_body(content, "Subagent Contribution Verification")
@@ -1828,6 +1977,8 @@ def lint_subagent_contribution_verification(
                 repo_root,
                 run_dir,
                 actual_changed_files,
+                current_phase,
+                file_path.name,
             )
         )
         if acceptance_decision in {"accepted", "partially accepted"}:
@@ -1898,10 +2049,6 @@ def lint_review_bundle_reference(content: str, run_dir: Path, repo_root: Path) -
         issues.append("Review bundle is missing Artifact Path")
     elif not (repo_root / artifact_path).exists():
         issues.append(f"Review bundle Artifact Path does not exist: {artifact_path}")
-    if artifact_path:
-        current_hash = content_sha256((repo_root / artifact_path).read_text(encoding="utf-8")) if (repo_root / artifact_path).exists() else ""
-        if artifact_hash and current_hash and artifact_hash != current_hash:
-            issues.append("Review bundle is stale: Artifact Content Hash no longer matches the current artifact")
     if not artifact_hash:
         issues.append("Review bundle is missing Artifact Content Hash")
 
@@ -1921,18 +2068,12 @@ def lint_review_bundle_reference(content: str, run_dir: Path, repo_root: Path) -
     if missing_bundle_headings:
         issues.append(f"Review bundle is missing required section(s): {', '.join(missing_bundle_headings)}")
 
-    review_narrative = "\n".join(
-        [
-            get_heading_body(content, "Review Scope"),
-            get_heading_body(content, "Requirement And Plan Reconciliation"),
-            get_heading_body(content, "Plan Alignment Assessment"),
-            get_heading_body(content, "Code Quality Assessment"),
-            get_heading_body(content, "Issues Found"),
-            get_heading_body(content, "Verdict"),
-        ]
-    )
+    ledger_path = normalize_repo_path(get_md_field_value(review_metadata, "Review Ledger Path") or "")
+    ledger_scope = ""
+    if ledger_path and (repo_root / ledger_path).is_file():
+        ledger_scope = get_heading_body((repo_root / ledger_path).read_text(encoding="utf-8"), "Review Scope")
     cited_paths = {normalize_repo_path(path) for path in extract_paths_from_text(content)}
-    cited_review_paths = {normalize_repo_path(path) for path in extract_paths_from_text(review_narrative)}
+    cited_review_paths = {normalize_repo_path(path) for path in extract_paths_from_text(ledger_scope)}
     upstream_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Upstream Artifacts To Re-read"))}
     addenda_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Relevant Addenda"))}
     prior_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Prior Recursive Evidence"))}
@@ -1964,20 +2105,16 @@ def lint_review_bundle_reference(content: str, run_dir: Path, repo_root: Path) -
     if missing_bundle_addenda:
         issues.append(f"Review bundle is missing effective-input addenda: {', '.join(missing_bundle_addenda[:5])}")
 
-    if upstream_paths and not any(path in cited_review_paths for path in upstream_paths):
-        issues.append("Code review narrative does not cite any upstream artifact from the review bundle")
-    if addenda_paths and not any(path in cited_review_paths for path in addenda_paths):
-        issues.append("Code review narrative does not cite any relevant addendum from the review bundle")
-    if prior_paths and not any(path in cited_review_paths for path in prior_paths):
-        issues.append("Code review narrative does not cite any prior recursive evidence from the review bundle")
-    if (changed_paths or code_ref_paths) and not any(path in cited_review_paths for path in (changed_paths | code_ref_paths)):
-        issues.append("Code review narrative does not cite any changed file or code reference from the review bundle")
+    if ledger_scope and upstream_paths and not any(path in cited_review_paths for path in upstream_paths):
+        issues.append("Review ledger scope does not cite any upstream artifact from the review bundle")
+    if ledger_scope and addenda_paths and not any(path in cited_review_paths for path in addenda_paths):
+        issues.append("Review ledger scope does not cite any relevant addendum from the review bundle")
+    if ledger_scope and prior_paths and not any(path in cited_review_paths for path in prior_paths):
+        issues.append("Review ledger scope does not cite any prior recursive evidence from the review bundle")
+    if ledger_scope and (changed_paths or code_ref_paths) and not any(path in cited_review_paths for path in (changed_paths | code_ref_paths)):
+        issues.append("Review ledger scope does not cite any changed file or code reference from the review bundle")
     if normalized_bundle_path not in cited_paths:
         issues.append("Code review must cite the Review Bundle Path in its written review artifact")
-
-    verdict_body = get_heading_body(content, "Verdict")
-    if not verdict_body or is_placeholder_only(verdict_body):
-        issues.append("Verdict section must contain a concrete review verdict grounded in the review bundle")
 
     return issues
 
@@ -2042,42 +2179,37 @@ def lint_phase8_skill_usage_capture(content: str) -> list[str]:
 def lint_phase_specific_rules(
     file_path: Path,
     content: str,
-    workflow_profile: str,
     run_dir: Path,
     repo_root: Path,
     requirement_ids: list[str],
     actual_changed_files: list[str] | None,
 ) -> list[str]:
     issues: list[str] = []
-    issues.extend(lint_effective_input_addenda(file_path, content, workflow_profile, run_dir))
-    issues.extend(lint_source_requirement_inventory(file_path, content, workflow_profile, run_dir))
+    issues.extend(lint_effective_input_addenda(file_path, content, run_dir))
+    issues.extend(lint_source_requirement_inventory(file_path, content, run_dir))
     if file_path.name == "02-to-be-plan.md":
-        issues.extend(lint_requirement_mapping(content, workflow_profile, run_dir, repo_root))
-        issues.extend(lint_plan_drift_check(content, workflow_profile))
+        issues.extend(lint_requirement_mapping(content, run_dir, repo_root))
+        issues.extend(lint_plan_drift_check(content))
+    issues.extend(lint_test_surface(file_path, content, run_dir, requirement_ids))
     issues.extend(
         lint_requirement_completion_status(
             file_path,
             content,
             requirement_ids,
             run_dir,
-            workflow_profile,
             actual_changed_files,
         )
     )
-    issues.extend(lint_prior_recursive_evidence(content, run_dir, workflow_profile, repo_root, file_path.name))
+    issues.extend(lint_prior_recursive_evidence(content, run_dir, repo_root, file_path.name))
     issues.extend(
         lint_subagent_contribution_verification(
             file_path,
             content,
-            workflow_profile,
             run_dir,
             repo_root,
             actual_changed_files,
         )
     )
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES:
-        return issues
-
     if file_path.name == "00-worktree.md":
         diff_basis, diff_basis_error = normalize_diff_basis(repo_root, get_run_diff_basis(run_dir))
         if diff_basis_error:
@@ -2171,7 +2303,20 @@ def lint_phase_specific_rules(
                         issues.append(f"QA evidence path(s) do not exist: {', '.join(missing_qa_paths[:5])}")
 
     if file_path.name == "03.5-code-review.md":
+        for heading in (
+            "Review Scope",
+            "Findings",
+            "Requirement And Plan Reconciliation",
+            "Plan Alignment Assessment",
+            "Code Quality Assessment",
+            "Issues Found",
+            "Verdict",
+        ):
+            if has_heading(content, heading):
+                issues.append(f"Phase 3.5 artifact must not duplicate ledger-owned section: ## {heading}")
         issues.extend(lint_review_bundle_reference(content, run_dir, repo_root))
+
+    issues.extend(review_ledger.collect_phase_issues(repo_root, run_dir, file_path.name, content))
 
     if file_path.name == "08-memory-impact.md":
         issues.extend(lint_phase8_skill_usage_capture(content))
@@ -2179,7 +2324,7 @@ def lint_phase_specific_rules(
     return sorted(set(issues))
 
 
-def get_artifact_required_sections(file_name: str, workflow_profile: str) -> list[str]:
+def get_artifact_required_sections(file_name: str) -> list[str]:
     section_map: dict[str, list[str]] = {
         "00-worktree.md": [
             "TODO",
@@ -2256,11 +2401,6 @@ def get_artifact_required_sections(file_name: str, workflow_profile: str) -> lis
         ],
         "03.5-code-review.md": [
             "TODO",
-            "Review Scope",
-            "Plan Alignment Assessment",
-            "Code Quality Assessment",
-            "Issues Found",
-            "Verdict",
             "Review Metadata",
             "Traceability",
             "Coverage Gate",
@@ -2324,10 +2464,12 @@ def get_artifact_required_sections(file_name: str, workflow_profile: str) -> lis
         ],
     }
     headings = list(section_map.get(file_name, ["TODO", "Coverage Gate", "Approval Gate"]))
-    if workflow_profile in STRICT_WORKFLOW_PROFILES and file_name in AUDITED_PHASE_FILES:
-        headings.extend(AUDIT_REQUIRED_HEADINGS)
+    if file_name in AUDITED_PHASE_FILES:
+        headings.extend(heading for heading in AUDIT_REQUIRED_HEADINGS if heading not in headings)
         if file_name in PRIOR_RECURSIVE_EVIDENCE_FILES:
             headings.append("Prior Recursive Evidence Reviewed")
+    if file_name == "02-to-be-plan.md":
+        headings.append("Test Surface")
     return headings
 
 
@@ -2355,31 +2497,27 @@ def get_header_remediation_lines(missing_fields: list[str]) -> list[str]:
     return out
 
 
-def is_lock_valid_for_lint(file_path: Path, workflow_profile: str) -> bool:
+def is_lock_valid_for_lint(file_path: Path) -> bool:
     if not file_path.exists():
         return False
 
     content = file_path.read_text(encoding="utf-8")
     status = get_md_field_value(content, "Status") or ""
     has_todo, _, _, unchecked = get_todo_stats(content)
-    audit_required = workflow_profile in STRICT_WORKFLOW_PROFILES and file_path.name in AUDITED_PHASE_FILES
-    audit_ok = (not audit_required) or get_gate_status(content, "Audit") == "PASS"
     run_dir = file_path.parent
     repo_root = run_dir.parent.parent.parent
     requirement_ids: list[str] = []
     requirements_path = run_dir / "00-requirements.md"
     if requirements_path.exists():
-        requirement_ids = get_run_requirement_ids(run_dir, workflow_profile)
+        requirement_ids = get_run_requirement_ids(run_dir)
     actual_changed_files: list[str] | None = None
-    if workflow_profile in STRICT_WORKFLOW_PROFILES:
-        diff_basis = get_run_diff_basis(run_dir)
-        raw_changed_files, _diff_basis_error = get_git_changed_files(repo_root, diff_basis)
-        if raw_changed_files is not None:
-            actual_changed_files = filter_runtime_changed_files(raw_changed_files, run_dir.name)
+    diff_basis = get_run_diff_basis(run_dir)
+    raw_changed_files, _diff_basis_error = get_git_changed_files(repo_root, diff_basis)
+    if raw_changed_files is not None:
+        actual_changed_files = filter_runtime_changed_files(raw_changed_files, run_dir.name)
     phase_specific_issues = lint_phase_specific_rules(
         file_path,
         content,
-        workflow_profile,
         run_dir,
         repo_root,
         requirement_ids,
@@ -2392,7 +2530,6 @@ def is_lock_valid_for_lint(file_path: Path, workflow_profile: str) -> bool:
         and has_header_field(content, "LockHash")
         and get_gate_status(content, "Coverage") == "PASS"
         and get_gate_status(content, "Approval") == "PASS"
-        and audit_ok
         and tdd_gate_ok
         and has_todo
         and unchecked == 0
@@ -2423,26 +2560,14 @@ def lint_traceability(file_path: Path, content: str, requirement_ids: list[str])
 def lint_audit_sections(
     file_path: Path,
     content: str,
-    workflow_profile: str,
     actual_changed_files: list[str] | None,
     diff_basis_error: str | None,
     run_id: str,
     run_dir: Path,
 ) -> list[str]:
     issues: list[str] = []
-    if workflow_profile not in STRICT_WORKFLOW_PROFILES or file_path.name not in AUDITED_PHASE_FILES:
+    if file_path.name not in AUDITED_PHASE_FILES:
         return issues
-
-    audit_status = get_gate_status(content, "Audit")
-    coverage_status = get_gate_status(content, "Coverage")
-    approval_status = get_gate_status(content, "Approval")
-
-    if audit_status == "MISSING":
-        issues.append("Missing required audit verdict line: Audit: PASS|FAIL")
-    if coverage_status == "PASS" and audit_status != "PASS":
-        issues.append("Coverage: PASS is invalid without Audit: PASS")
-    if approval_status == "PASS" and audit_status != "PASS":
-        issues.append("Approval: PASS is invalid without Audit: PASS")
 
     audit_context = get_heading_body(content, "Audit Context")
     if not audit_context:
@@ -2452,9 +2577,11 @@ def lint_audit_sections(
             issues.append("Audit Context is missing a valid Audit Execution Mode: subagent|self-audit")
         if get_md_field_value(audit_context, "Subagent Availability") not in {"available", "unavailable"}:
             issues.append("Audit Context is missing a valid Subagent Availability: available|unavailable")
-        if not has_meaningful_value(get_md_field_value(audit_context, "Subagent Capability Probe"), disallowed={"n/a", "none"}):
+        capability_probe = get_md_field_value(audit_context, "Subagent Capability Probe")
+        if not has_meaningful_value(capability_probe, disallowed={"n/a", "none"}) or is_field_placeholder(capability_probe):
             issues.append("Audit Context is missing Subagent Capability Probe")
-        if not has_meaningful_value(get_md_field_value(audit_context, "Delegation Decision Basis"), disallowed={"n/a", "none"}):
+        decision_basis = get_md_field_value(audit_context, "Delegation Decision Basis")
+        if not has_meaningful_value(decision_basis, disallowed={"n/a", "none"}) or is_field_placeholder(decision_basis):
             issues.append("Audit Context is missing Delegation Decision Basis")
         if get_md_field_value(audit_context, "Audit Inputs Provided") is None and "Audit Inputs Provided:" not in audit_context:
             issues.append("Audit Context is missing Audit Inputs Provided")
@@ -2471,10 +2598,6 @@ def lint_audit_sections(
     for field in DIFF_BASIS_FIELDS:
         if get_md_field_value(diff_audit_body, field) is None:
             issues.append(f"Worktree Diff Audit is missing: {field}:")
-
-    gaps_body = get_heading_body(content, "Gaps Found")
-    if audit_status == "PASS" and gaps_body and not re.search(r"\bnone\b", gaps_body, re.IGNORECASE):
-        issues.append("Audit: PASS is invalid while Gaps Found still lists unresolved in-scope gaps")
 
     expected_changed_files = get_phase_owned_actual_changed_files(file_path.name, actual_changed_files)
     if file_path.name in DIFF_AUDITED_FILES and expected_changed_files is not None:
@@ -2495,7 +2618,6 @@ def lint_artifact_file(
     file_path: Path,
     run_dir: Path,
     repo_root: Path,
-    workflow_profile: str,
     requirement_ids: list[str],
     actual_changed_files: list[str] | None,
     diff_basis_error: str | None,
@@ -2549,7 +2671,7 @@ def lint_artifact_file(
             ["# Option A: check all TODO boxes under ## TODO", "# Option B: set Status back to `DRAFT` until TODOs are complete"],
         )
 
-    for heading in get_artifact_required_sections(file_name, workflow_profile):
+    for heading in get_artifact_required_sections(file_name):
         if not has_heading(content, heading):
             fail_count += 1
             write_issue("FAIL", file_path, f"Missing required section heading: ## {heading}", [f"## {heading}", "", "<content>"])
@@ -2567,7 +2689,6 @@ def lint_artifact_file(
     audit_issues = lint_audit_sections(
         file_path,
         content,
-        workflow_profile,
         actual_changed_files,
         diff_basis_error,
         run_dir.name,
@@ -2580,7 +2701,6 @@ def lint_artifact_file(
     phase_specific_issues = lint_phase_specific_rules(
         file_path,
         content,
-        workflow_profile,
         run_dir,
         repo_root,
         requirement_ids,
@@ -2745,14 +2865,10 @@ def main() -> None:
     for run_dir in run_dirs:
         print(f"Linting run: {run_dir.name}")
         print(f"Path: {run_dir}")
-        workflow_profile = get_workflow_profile(run_dir)
-        print(f"Workflow Profile: {workflow_profile}")
-        print()
-
         requirements_path = run_dir / "00-requirements.md"
         requirement_ids: list[str] = []
         if requirements_path.exists():
-            requirement_ids = get_run_requirement_ids(run_dir, workflow_profile)
+            requirement_ids = get_run_requirement_ids(run_dir)
             if not requirement_ids:
                 total_fail += 1
                 write_issue("FAIL", requirements_path, "Could not determine any requirement or source-inventory IDs for the run")
@@ -2760,15 +2876,11 @@ def main() -> None:
         diff_basis = get_run_diff_basis(run_dir)
         actual_changed_files: list[str] | None = None
         diff_basis_error: str | None = None
-        if workflow_profile in STRICT_WORKFLOW_PROFILES:
-            raw_changed_files, diff_basis_error = get_git_changed_files(repo_root, diff_basis)
-            if raw_changed_files is not None:
-                actual_changed_files = filter_runtime_changed_files(raw_changed_files, run_dir.name)
+        raw_changed_files, diff_basis_error = get_git_changed_files(repo_root, diff_basis)
+        if raw_changed_files is not None:
+            actual_changed_files = filter_runtime_changed_files(raw_changed_files, run_dir.name)
 
         expected_artifacts = list(artifacts)
-        if workflow_profile == "legacy":
-            expected_artifacts = [artifact for artifact in expected_artifacts if artifact not in LATE_PHASE_ARTIFACTS]
-
         for artifact in expected_artifacts:
             artifact_path = run_dir / artifact
             if not artifact_path.exists():
@@ -2780,7 +2892,6 @@ def main() -> None:
                 artifact_path,
                 run_dir,
                 repo_root,
-                workflow_profile,
                 requirement_ids,
                 actual_changed_files,
                 diff_basis_error,
@@ -2795,7 +2906,6 @@ def main() -> None:
                     addendum,
                     run_dir,
                     repo_root,
-                    workflow_profile,
                     requirement_ids,
                     actual_changed_files,
                     diff_basis_error,
@@ -2815,11 +2925,15 @@ def main() -> None:
         # earlier phases that also exist must already be LOCKED.  This catches
         # backfilled or out-of-order artifact creation.
         phase_rules = load_phase_rules_module()
+        activated_phases, activation_issues = get_active_scheduled_owner_phases(repo_root, run_dir)
+        for issue in activation_issues:
+            total_fail += 1
+            write_issue("FAIL", run_dir / "evidence/reviews/scheduled", f"Scheduled phase activation: {issue}")
         for artifact in expected_artifacts:
             artifact_path = run_dir / artifact
             if not artifact_path.exists():
                 continue
-            blockers = phase_rules.get_prerequisite_blockers(artifact, run_dir)
+            blockers = phase_rules.get_prerequisite_blockers(artifact, run_dir, activated_phases)
             for blocker in blockers:
                 total_fail += 1
                 write_issue(
@@ -2828,24 +2942,23 @@ def main() -> None:
                     f"Phase-sequence violation: {artifact!r} exists but prerequisite {blocker['artifact']!r} is {blocker['status']} (must be LOCKED first)",
                 )
 
-        if workflow_profile in (STRICT_WORKFLOW_PROFILES | {COMPAT_WORKFLOW_PROFILE}):
-            late_requirements = [
-                ("05-manual-qa.md", "06-decisions-update.md"),
-                ("06-decisions-update.md", "07-state-update.md"),
-                ("07-state-update.md", "08-memory-impact.md"),
-            ]
-            for prior_artifact, next_artifact in late_requirements:
-                if is_lock_valid_for_lint(run_dir / prior_artifact, workflow_profile) and not (run_dir / next_artifact).exists():
-                    total_fail += 1
-                    write_issue(
-                        "FAIL",
-                        run_dir / next_artifact,
-                        f"Run profile {workflow_profile} requires {next_artifact} after {prior_artifact} locks",
-                    )
+        late_requirements = [
+            ("05-manual-qa.md", "06-decisions-update.md"),
+            ("06-decisions-update.md", "07-state-update.md"),
+            ("07-state-update.md", "08-memory-impact.md"),
+        ]
+        for prior_artifact, next_artifact in late_requirements:
+            if is_lock_valid_for_lint(run_dir / prior_artifact) and not (run_dir / next_artifact).exists():
+                total_fail += 1
+                write_issue(
+                    "FAIL",
+                    run_dir / next_artifact,
+                    f"Current workflow requires {next_artifact} after {prior_artifact} locks",
+                )
 
-            memory_fail, memory_warn = lint_memory_plane(repo_root)
-            total_fail += memory_fail
-            total_warn += memory_warn
+        memory_fail, memory_warn = lint_memory_plane(repo_root)
+        total_fail += memory_fail
+        total_warn += memory_warn
 
         print("----")
         print()

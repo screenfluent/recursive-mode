@@ -122,7 +122,6 @@ function New-RequirementsContent {
 Run: `/.recursive/run/{0}/`
 Phase: `00 Requirements`
 Status: `DRAFT`
-Workflow version: `recursive-mode-audit-v2`
 Inputs:
 {1}
 Outputs:
@@ -471,6 +470,7 @@ Ensure-Directory -Path (Join-Path $evidenceDir "screenshots")
 Ensure-Directory -Path (Join-Path $evidenceDir "logs")
 Ensure-Directory -Path (Join-Path $evidenceDir "perf")
 Ensure-Directory -Path (Join-Path $evidenceDir "traces")
+Ensure-Directory -Path (Join-Path $evidenceDir "reviews")
 Ensure-Directory -Path (Join-Path $evidenceDir "review-bundles")
 Ensure-Directory -Path (Join-Path $evidenceDir "router")
 Ensure-Directory -Path (Join-Path $evidenceDir "other")

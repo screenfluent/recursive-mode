@@ -12,6 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import recursive_phase_rules as phase_rules_registry
+
+
 
 PHASE_CONFIG: dict[str, dict[str, object]] = {
     "04": {
@@ -226,14 +229,41 @@ def default_requirement_status_section(requirement_ids: list[str], run_dir: Path
 def default_audit_context(file_name: str, inputs: list[str]) -> str:
     return "\n".join(
         [
-            "- Audit Execution Mode: self-audit",
-            "- Subagent Availability: unavailable",
-            f"- Subagent Capability Probe: `Populate whether delegated audit is actually available for {file_name}.`",
-            "- Delegation Decision Basis: `Populate why this phase remains self-audited or how delegated review was grounded.`",
+            "- Audit Execution Mode: <subagent|self-audit>",
+            "- Subagent Availability: <available|unavailable>",
+            f"- Subagent Capability Probe: <record the capability probe result for {file_name}>",
+            "- Delegation Decision Basis: <record why the selected execution mode follows from the probe>",
             "- Audit Inputs Provided:",
             *[f"  - `/{value}`" for value in inputs],
         ]
     )
+
+
+def default_review_metadata(run_dir: Path, file_name: str) -> str:
+    phase_key = phase_rules_registry.audited_phase_key(file_name)
+    if phase_key is None:
+        raise ValueError(f"Review Metadata requested for non-audited artifact: {file_name}")
+    review_id = "<review-id>"
+    review_root = f"/.recursive/run/{run_dir.name}/evidence/reviews/{phase_key}/{review_id}"
+    bundle_root = f"/.recursive/run/{run_dir.name}/evidence/review-bundles/{phase_key}/{review_id}"
+    return "\n".join(
+        [
+            f"- Review ID: {review_id}",
+            f"- Review Ledger Path: `{review_root}/ledger.md`",
+            f"- Latest Verified Pass: `{review_root}/passes/<NNNN>.md`",
+            "- Latest Verified Pass Hash: <sha256>",
+            f"- Review Bundle Path: `{bundle_root}/<NNNN>.md`",
+            "- Review Bundle Hash: <sha256>",
+        ]
+    )
+
+
+def ensure_review_roots(run_dir: Path, file_name: str) -> None:
+    phase_key = phase_rules_registry.audited_phase_key(file_name)
+    if phase_key is None:
+        return
+    for relative in (f"evidence/reviews/{phase_key}", f"evidence/review-bundles/{phase_key}"):
+        (run_dir / relative).mkdir(parents=True, exist_ok=True)
 
 
 def default_diff_basis_section(lint, run_dir: Path) -> str:
@@ -362,6 +392,8 @@ def section_body(
         return "- Replace these checklist items with phase-specific approval proof before locking.\nApproval: FAIL"
     if heading == "Audit Context":
         return default_audit_context(PHASE_CONFIG[phase_key]["file_name"], inputs)  # type: ignore[index]
+    if heading == "Review Metadata":
+        return default_review_metadata(run_dir, PHASE_CONFIG[phase_key]["file_name"])  # type: ignore[index]
     if heading == "Effective Inputs Re-read":
         return list_block(inputs)
     if heading == "Prior Recursive Evidence Reviewed":
@@ -372,14 +404,8 @@ def section_body(
         return "- No subagent work recorded yet; if delegated closeout work materially contributes, record Reviewed Action Records, Main-Agent Verification Performed, Acceptance Decision, Refresh Handling, and Repair Performed After Verification."
     if heading == "Worktree Diff Audit":
         return default_diff_basis_section(lint, run_dir)
-    if heading == "Gaps Found":
-        return "- Record unresolved gaps here. Replace with `None.` only after the audit is complete."
-    if heading == "Repair Work Performed":
-        return "- Record any repair work performed during closeout, or explain why no repair was required."
     if heading == "Requirement Completion Status":
         return default_requirement_status_section(requirement_ids, run_dir)
-    if heading == "Audit Verdict":
-        return "- Record the final audit verdict grounded in the reviewed inputs and outputs before locking.\nAudit: FAIL"
     return "- Populate this section before locking."
 
 
@@ -392,8 +418,7 @@ def build_scaffold(
     preview_url: str,
 ) -> str:
     file_name = PHASE_CONFIG[phase_key]["file_name"]  # type: ignore[index]
-    workflow_profile = lint.get_workflow_profile(run_dir)
-    headings = lint.get_artifact_required_sections(file_name, workflow_profile)
+    headings = lint.get_artifact_required_sections(file_name)
     inputs = collect_phase_inputs(lint, repo_root, run_dir, file_name, phase_key, preview_log_path)
     outputs = collect_phase_outputs(run_dir, phase_key, file_name)
     requirement_ids = parse_requirement_ids(lint, run_dir)
@@ -505,12 +530,16 @@ def main() -> int:
 
     lint = load_lint_module()
     phase_rules = load_phase_rules_module()
+    activated_phases, activation_issues = lint.get_active_scheduled_owner_phases(repo_root, run_dir)
+    for issue in activation_issues:
+        print(f"[WARN] Invalid scheduled phase activation: {issue}")
     file_name = PHASE_CONFIG[phase_key]["file_name"]  # type: ignore[index]
     artifact_path = run_dir / file_name
+    ensure_review_roots(run_dir, file_name)
 
     # Advisory prerequisite check: warn if earlier phases are not yet locked.
     # (Hard enforcement happens at lock time via recursive-lock.py.)
-    blockers = phase_rules.get_prerequisite_blockers(file_name, run_dir)
+    blockers = phase_rules.get_prerequisite_blockers(file_name, run_dir, activated_phases)
     if blockers:
         print(f"[WARN] Scaffolding {file_name} before prerequisite phases are LOCKED")
         for blocker in blockers:

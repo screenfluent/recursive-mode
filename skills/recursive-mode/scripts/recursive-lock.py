@@ -71,10 +71,9 @@ def set_or_insert_field(content: str, field_name: str, value: str, after_fields:
     return "\n".join(lines)
 
 
-def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path) -> tuple[list[str], str, str]:
+def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path) -> tuple[list[str], str]:
     issues: list[str] = []
     content = artifact_path.read_text(encoding="utf-8")
-    workflow_profile = lint.get_workflow_profile(run_dir)
     requirement_ids: list[str] = []
     status = lint.get_md_field_value(content, "Status") or "UNKNOWN"
 
@@ -84,11 +83,10 @@ def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path)
 
     actual_changed_files: list[str] | None = None
     diff_basis_error: str | None = None
-    if workflow_profile == lint.STRICT_WORKFLOW_PROFILE:
-        diff_basis = lint.get_run_diff_basis(run_dir)
-        raw_changed_files, diff_basis_error = lint.get_git_changed_files(repo_root, diff_basis)
-        if raw_changed_files is not None:
-            actual_changed_files = lint.filter_runtime_changed_files(raw_changed_files, run_dir.name)
+    diff_basis = lint.get_run_diff_basis(run_dir)
+    raw_changed_files, diff_basis_error = lint.get_git_changed_files(repo_root, diff_basis)
+    if raw_changed_files is not None:
+        actual_changed_files = lint.filter_runtime_changed_files(raw_changed_files, run_dir.name)
 
     if status not in {"DRAFT", "LOCKED"}:
         issues.append(f"Artifact Status must be DRAFT before locking (found {status})")
@@ -105,7 +103,7 @@ def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path)
     elif todo_unchecked > 0:
         issues.append(f"Unchecked TODO items remain: {todo_unchecked}")
 
-    for heading in lint.get_artifact_required_sections(artifact_path.name, workflow_profile):
+    for heading in lint.get_artifact_required_sections(artifact_path.name):
         if not lint.has_heading(content, heading):
             issues.append(f"Missing required section heading: ## {heading}")
 
@@ -118,7 +116,6 @@ def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path)
         lint.lint_audit_sections(
             artifact_path,
             content,
-            workflow_profile,
             actual_changed_files,
             diff_basis_error,
             run_dir.name,
@@ -129,7 +126,6 @@ def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path)
         lint.lint_phase_specific_rules(
             artifact_path,
             content,
-            workflow_profile,
             run_dir,
             repo_root,
             requirement_ids,
@@ -143,23 +139,39 @@ def validate_lockable(lint, repo_root: Path, run_dir: Path, artifact_path: Path)
         issues.append("Approval gate must be PASS before locking")
     if artifact_path.name == "03-implementation-summary.md" and lint.get_gate_status(content, "TDD Compliance") != "PASS":
         issues.append("TDD Compliance gate must be PASS before locking Phase 3")
-    if workflow_profile == lint.STRICT_WORKFLOW_PROFILE and artifact_path.name in lint.AUDITED_PHASE_FILES:
-        if lint.get_gate_status(content, "Audit") != "PASS":
-            issues.append("Audit gate must be PASS before locking this audited phase")
-
     deduped_issues = sorted(set(issues))
     if status == "LOCKED":
         locked_at = lint.get_md_field_value(content, "LockedAt")
         stored_hash = lint.get_md_field_value(content, "LockHash")
         actual_hash = lock_hash_from_content(content) if stored_hash else None
         if locked_at and stored_hash and actual_hash and stored_hash.lower() == actual_hash.lower() and not deduped_issues:
-            return [], content, workflow_profile
+            return [], content
         if not deduped_issues:
             deduped_issues.append("Artifact is already LOCKED but its lock metadata is invalid")
         else:
             deduped_issues.append("Artifact is already LOCKED but not lock-valid under current rules; set it back to DRAFT before re-locking")
 
-    return sorted(set(deduped_issues)), content, workflow_profile
+    return sorted(set(deduped_issues)), content
+
+
+def get_semantic_prerequisite_blockers(phase_rules, lint, repo_root: Path, run_dir: Path, artifact_name: str, activated_phases) -> list[dict[str, str]]:
+    blockers = phase_rules.get_prerequisite_blockers(artifact_name, run_dir, activated_phases)
+    mechanically_blocked = {blocker["artifact"] for blocker in blockers}
+    for prerequisite in phase_rules.get_prerequisites(artifact_name, run_dir, activated_phases):
+        if prerequisite in mechanically_blocked:
+            continue
+        prerequisite_path = run_dir / prerequisite
+        issues, _content = validate_lockable(lint, repo_root, run_dir, prerequisite_path)
+        if issues:
+            blockers.append(
+                {
+                    "artifact": prerequisite,
+                    "status": "INVALID",
+                    "path": str(prerequisite_path),
+                    "detail": issues[0],
+                }
+            )
+    return blockers
 
 
 def resolve_artifact_path(run_dir: Path, artifact_arg: str) -> Path:
@@ -237,33 +249,39 @@ def main() -> int:
         return 1
 
     phase_rules = load_phase_rules_module()
+    lint = load_lint_module()
+    activated_phases, activation_issues = lint.get_active_scheduled_owner_phases(repo_root, run_dir)
 
     if args.reopen:
         return reopen_artifact(phase_rules, run_dir, artifact_path, repo_root)
 
-    # Prerequisite gate: all earlier phases that exist must be LOCKED first.
+    if activation_issues:
+        print(f"[FAIL] Invalid scheduled phase activation under {run_dir.relative_to(repo_root)}")
+        for issue in activation_issues:
+            print(f"  - {issue}")
+        return 1
+
+    # Prerequisite gate: all earlier phases must be mechanically and semantically lock-valid.
     artifact_name = artifact_path.name
     if phase_rules.is_core_artifact(artifact_name):
-        blockers = phase_rules.get_prerequisite_blockers(artifact_name, run_dir)
+        blockers = get_semantic_prerequisite_blockers(phase_rules, lint, repo_root, run_dir, artifact_name, activated_phases)
         if blockers:
-            print(f"[FAIL] Cannot lock {artifact_path.relative_to(repo_root)}: prerequisite phases are not yet LOCKED")
+            print(f"[FAIL] Cannot lock {artifact_path.relative_to(repo_root)}: prerequisite phases are not lock-valid")
             for blocker in blockers:
-                print(f"  - {blocker['artifact']}: {blocker['status']} ({blocker['path']})")
+                detail = f" - {blocker['detail']}" if blocker.get("detail") else ""
+                print(f"  - {blocker['artifact']}: {blocker['status']} ({blocker['path']}){detail}")
             return 1
 
-    lint = load_lint_module()
-    issues, content, workflow_profile = validate_lockable(lint, repo_root, run_dir, artifact_path)
+    issues, content = validate_lockable(lint, repo_root, run_dir, artifact_path)
 
     if not issues:
         status = lint.get_md_field_value(content, "Status") or "UNKNOWN"
         if status == "LOCKED":
             print(f"[OK] Artifact already lock-valid: {artifact_path.relative_to(repo_root)}")
-            print(f"Workflow Profile: {workflow_profile}")
             return 0
 
     if issues:
         print(f"[FAIL] Refusing to lock {artifact_path.relative_to(repo_root)}")
-        print(f"Workflow Profile: {workflow_profile}")
         for issue in issues:
             print(f"- {issue}")
         return 1
@@ -281,7 +299,7 @@ def main() -> int:
 
     # Write lock receipt for chain tracking.
     if phase_rules.is_core_artifact(artifact_name):
-        phase_rules.write_receipt(run_dir, artifact_name, artifact_path)
+        phase_rules.write_receipt(run_dir, artifact_name, artifact_path, activated_phases)
 
     # Report stale downstream phases so the caller knows what needs re-locking.
     if phase_rules.is_core_artifact(artifact_name):
@@ -292,7 +310,6 @@ def main() -> int:
                 print(f"  - {entry['artifact']}: {entry['reason']}")
 
     print(f"[OK] Locked {artifact_path.relative_to(repo_root)}")
-    print(f"Workflow Profile: {workflow_profile}")
     print(f"LockedAt: {locked_at}")
     print(f"LockHash: {lock_hash}")
     return 0

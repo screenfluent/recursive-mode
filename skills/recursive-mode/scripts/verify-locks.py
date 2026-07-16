@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import recursive_review_ledger as review_ledger
+
 
 def load_phase_rules_module():
     module_path = Path(__file__).with_name("recursive_phase_rules.py")
@@ -33,22 +35,6 @@ STATUS_RE = re.compile(r'(?m)^[ \t]*Status:\s*(?:`|")?(\w+)(?:`|")?\s*$')
 LOCK_HASH_RE = re.compile(r'(?m)^[ \t]*LockHash:\s*(?:`|")?([a-fA-F0-9]{64})(?:`|")?\s*$')
 LOCKED_AT_RE = re.compile(r'(?m)^[ \t]*LockedAt:\s*(?:`|")?([^`"\r\n]+)(?:`|")?\s*$')
 LOCK_HASH_LINE_RE = re.compile(r'(?m)^[ \t]*LockHash:.*(?:\n|$)')
-WORKFLOW_VERSION_RE = re.compile(r'(?m)^[ \t]*Workflow version:\s*(?:`|")?([^`"\r\n]+)(?:`|")?\s*$')
-CURRENT_WORKFLOW_PROFILE = "recursive-mode-audit-v2"
-STRICT_WORKFLOW_PROFILE = "recursive-mode-audit-v1"
-COMPAT_WORKFLOW_PROFILE = "memory-phase8"
-STRICT_WORKFLOW_PROFILES = {CURRENT_WORKFLOW_PROFILE, STRICT_WORKFLOW_PROFILE}
-AUDITED_PHASE_FILES = {
-    "01-as-is.md",
-    "01.5-root-cause.md",
-    "02-to-be-plan.md",
-    "03-implementation-summary.md",
-    "03.5-code-review.md",
-    "04-test-summary.md",
-    "06-decisions-update.md",
-    "07-state-update.md",
-    "08-memory-impact.md",
-}
 
 
 @dataclass
@@ -76,27 +62,6 @@ def normalize_for_lock_hash(content: str) -> str:
 def lock_hash_from_content(content: str) -> str:
     normalized = normalize_for_lock_hash(content)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def get_workflow_profile(run_dir: Path) -> str:
-    requirements_path = run_dir / "00-requirements.md"
-    if requirements_path.exists():
-        content = requirements_path.read_text(encoding="utf-8")
-        match = WORKFLOW_VERSION_RE.search(content)
-        if match:
-            workflow_version = match.group(1).strip()
-            if workflow_version == CURRENT_WORKFLOW_PROFILE:
-                return CURRENT_WORKFLOW_PROFILE
-            if workflow_version == STRICT_WORKFLOW_PROFILE:
-                return STRICT_WORKFLOW_PROFILE
-            if workflow_version == COMPAT_WORKFLOW_PROFILE:
-                return COMPAT_WORKFLOW_PROFILE
-
-    for artifact in ("06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"):
-        if (run_dir / artifact).exists():
-            return COMPAT_WORKFLOW_PROFILE
-
-    return "legacy"
 
 
 def test_lock_valid(artifact_path: Path, fix: bool = False) -> LockResult:
@@ -166,6 +131,11 @@ def test_gate(content: str, name: str) -> tuple[bool, str | None]:
     return False, f"No {name} gate result found"
 
 
+def collect_recursive_review_issues(repo_root: Path, run_dir: Path, artifact_name: str, content: str) -> list[str]:
+    """Thin adapter to the shared Recursive Review validation interface."""
+    return review_ledger.collect_phase_issues(repo_root, run_dir, artifact_name, content)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify recursive-mode artifact lock integrity.")
     parser.add_argument("--run-id", default="", help="Run ID to verify. If omitted, scans all runs.")
@@ -216,10 +186,8 @@ def main() -> int:
     for run in runs:
         total_runs += 1
         run_dir = run_base_dir / run
-        workflow_profile = get_workflow_profile(run_dir)
         print(f"Checking run: {run}")
         print("-" * 50)
-        print(f"Workflow profile: {workflow_profile}")
 
         run_valid = True
         run_fixed = False
@@ -227,8 +195,6 @@ def main() -> int:
         for artifact in artifacts:
             artifact_path = run_dir / artifact["file"]
             is_required = not artifact["optional"]
-            if workflow_profile == "legacy" and artifact["file"] in {"06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"}:
-                is_required = False
             if not artifact_path.exists():
                 if not is_required:
                     write_status("INFO", f"{artifact['name']}: Not found (optional)")
@@ -243,7 +209,11 @@ def main() -> int:
                 run_valid = False
                 continue
 
-            result = test_lock_valid(artifact_path, fix=args.fix)
+            review_issues = collect_recursive_review_issues(resolved_repo_root, run_dir, artifact["file"], content)
+            for issue in review_issues:
+                write_status("FAIL", f"{artifact['name']}: {issue}")
+                run_valid = False
+            result = test_lock_valid(artifact_path, fix=args.fix and not review_issues)
             if result.valid:
                 write_status("PASS", f"{artifact['name']}: Valid (locked at {result.locked_at})")
                 if args.show_hashes and result.stored_hash:
@@ -269,19 +239,11 @@ def main() -> int:
             updated_content = artifact_path.read_text(encoding="utf-8")
             coverage_ok, coverage_reason = test_gate(updated_content, "Coverage")
             approval_ok, approval_reason = test_gate(updated_content, "Approval")
-            audit_required = workflow_profile in STRICT_WORKFLOW_PROFILES and artifact["file"] in AUDITED_PHASE_FILES
-            audit_ok = True
-            audit_reason = None
-            if audit_required:
-                audit_ok, audit_reason = test_gate(updated_content, "Audit")
             if not coverage_ok:
                 write_status("FAIL", f"{artifact['name']}: Coverage gate - {coverage_reason}")
                 run_valid = False
             if not approval_ok:
                 write_status("FAIL", f"{artifact['name']}: Approval gate - {approval_reason}")
-                run_valid = False
-            if not audit_ok:
-                write_status("FAIL", f"{artifact['name']}: Audit gate - {audit_reason}")
                 run_valid = False
 
         addenda_dir = run_dir / "addenda"
