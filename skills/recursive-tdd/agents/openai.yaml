@@ -1,4 +1,4 @@
 interface:
   display_name: "Recursive TDD"
-  short_description: "Strict TDD for recursive-mode Phase 3"
-  default_prompt: "Use $recursive-tdd to drive this recursive-mode Phase 3 change with strict RED-GREEN-REFACTOR discipline."
+  short_description: "Tracer-bullet TDD at approved Test Surfaces"
+  default_prompt: "Use $recursive-tdd to implement this Phase 3 change as tracer-bullet RED-GREEN-bounded-REFACTOR cycles at approved Test Surfaces."

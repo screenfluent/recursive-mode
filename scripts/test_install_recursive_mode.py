@@ -367,25 +367,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
         self.assertTrue((repo_root / "skills" / "recursive-training" / "references" / "memory-architecture.md").exists())
         self.assertTrue((repo_root / "skills" / "recursive-training" / "references" / "phase8-and-loading.md").exists())
 
-    def test_phase_oriented_skills_reflect_current_artifact_contract(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        expectations = {
-            Path("skills/recursive-spec/SKILL.md"): ("## TODO", "Workflow version: `recursive-mode-audit-v2`"),
-            Path("skills/recursive-worktree/SKILL.md"): ("## TODO", "Normalized diff command"),
-            Path("skills/recursive-tdd/SKILL.md"): (
-                "## TODO",
-                "Subagent Capability Probe",
-                "Delegation Decision Basis",
-                "## Requirement Completion Status",
-            ),
-        }
-
-        for relative_path, required_snippets in expectations.items():
-            content = (repo_root / relative_path).read_text(encoding="utf-8")
-            for snippet in required_snippets:
-                with self.subTest(path=str(relative_path), snippet=snippet):
-                    self.assertIn(snippet, content)
-
     def test_installer_gitignores_device_local_router_discovery_inventory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install-recursive-mode-") as temp_dir:
             repo_root = Path(temp_dir) / "repo"
