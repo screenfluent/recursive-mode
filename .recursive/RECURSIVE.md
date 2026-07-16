@@ -307,10 +307,21 @@ Use `recursive-review-bundle` when possible to package the handoff. A valid bund
 - phase-specific audit questions
 - required output shape
 
-For Phase 3.5, the phase artifact should record `Review Bundle Path` in `## Review Metadata`.
-If repairs materially change the reviewed scope, refresh the bundle before re-audit.
-`recursive-review-bundle` auto-discovers relevant addenda by default. Do not silently omit them from delegated review context.
-The written Phase 3.5 review must cite the bundle path plus bundle-grounded upstream artifacts, relevant addenda, and changed files or code references in the review narrative, not only in metadata boilerplate.
+Each audited phase stores one canonical current ledger at `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/ledger.md`, immutable completed snapshots at `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/passes/<NNNN>.md`, and one immutable same-pass bundle at `/.recursive/run/<run-id>/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`. The ledger is current operational state, pass snapshots are immutable history, and the bundle is reproducible review input rather than a second ledger.
+
+Every audited artifact has exactly one `## Review Metadata` section containing only these fields in order: `Review ID`, `Review Ledger Path`, `Latest Verified Pass`, `Latest Verified Pass Hash`, `Review Bundle Path`, `Review Bundle Hash`. The review ID is unique within the run, and every path, phase key, pass number, artifact address, and cited hash must agree across the artifact, ledger, pass, and bundle.
+
+Reviewer and self-audit output has exactly `## Review Scope`, `## Findings`, and `## Verdict`. Every technical issue is an append-only stable `F-*` record; previous IDs and immutable technical fields never disappear or change. `Depends on` names only a true repair prerequisite, forms an acyclic graph over existing findings, and permits `fixed` only after every dependency is itself `fixed`.
+
+The reviewer creates findings as `open`. Repair agents may update only `Claimed outcome: none|fixed|blocked`, `Claimed changes`, and `Claimed verification`; these remain claims until the controller checks the actual diff, artifacts, owning contract, and named verification for that row. Only the controller assigns `fixed`, `rejected`, `scheduled`, `deferred`, or `out-of-scope`, with the disposition-specific rationale, owner, approval, decision, and durable destination required by the canonical finding protocol. Labels, severity, effort, a delegated PASS, commit message, action record, or test report never close a finding.
+
+`scheduled` is available only inside an active run and only for work already owned by a strictly later canonical phase. It copies the full obligation into `/.recursive/run/<run-id>/evidence/reviews/scheduled/<owner-phase-key>/inventory.md`; a valid pending record makes that owner required, the owner consumes the record with controller evidence, and final verification rejects any pending record. Standalone review cannot schedule work.
+
+Before repair changes a reviewed surface, advance to the next working pass from the immediately preceding immutable snapshot, verify its normalized hash, preserve all terminal history, reset only open claims, and refresh the immutable bundle. Every changed diff byte, file membership or mode, artifact, or evidence reference requires that next pass; `/.recursive/scripts/recursive_review_surface.py` binds the current changed surface and local reviewed/evidence files without treating historical snapshots as current worktree claims.
+
+`recursive-review-bundle` auto-discovers relevant addenda by default. Do not silently omit them from delegated review context. The review scope cites the bundle plus its grounded upstream artifacts, addenda, changed files, code references, and evidence. Persisted repair/review action records cite the ledger, immutable bundle, and four-digit pass, and contain only sorted claims for existing open findings; `/.recursive/scripts/recursive_review_action.py` owns that claim grammar.
+
+PASS is derived from the whole canonical ledger: every finding must have a controller-verified terminal disposition, no finding may remain open, and no scheduled handoff may be due and unconsumed. There is no secondary advice list, severity gate, model vote, or prose verdict that can override ledger state.
 
 ## Canonical router policy for delegated model calls
 
