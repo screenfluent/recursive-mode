@@ -43,6 +43,14 @@ Manual QA approval depends on the declared `QA Execution Mode` in the Manual QA 
 
 If recursive-mode is invoked in a repository that does not yet contain the required `/.recursive/` scaffold and bridge docs, the agent should run the supported bootstrap installer automatically before continuing. Do not require the user to perform a separate manual bootstrap step unless no supported runtime is available to execute the installer.
 
+6) Protected transitions require evidence.
+
+### Compatibility gate
+
+Prefer atomic replacement so the resulting system reads as if it had always used the current contract. Introduce a compatibility path — including versioning, migration scaffolding, aliases, shims, or dual paths — only after an explicit human decision, evidence of a live consumer of the superseded contract, and evidence that the consumer cannot be migrated atomically. Anticipated consumers, historical documents, and untracked conversation do not satisfy this gate.
+
+When repository evidence cannot settle a requirements-time choice between atomic replacement and a protected transition, route that decision through `recursive-grilling` and return the confirmed answer to the active requirements draft. Ordinary refactors that introduce no protective mechanism do not trigger this gate.
+
 ## Global artifacts (across all recursive-mode runs)
 
 recursive-mode uses two global documents shared by all requirements:
