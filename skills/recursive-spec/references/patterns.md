@@ -3,7 +3,7 @@
 ## Table of Contents
 
 - [Purpose](#purpose)
-- [Interaction Pattern](#interaction-pattern)
+- [Interview Pattern](#interview-pattern)
 - [Temporary Draft Rule](#temporary-draft-rule)
 - [Required Inputs To Gather](#required-inputs-to-gather)
 - [Repo-Aware Reading Heuristics](#repo-aware-reading-heuristics)
@@ -14,11 +14,13 @@
 
 ## Purpose
 
-Use this reference when helping a user turn a vague request into a strong `00-requirements.md` for a new recursive-mode run.
+Use this reference for the Interview branch when helping a user turn an unsettled request into a strong `00-requirements.md` for a new Recursive run.
 
 The output stays native to recursive-mode. Do not switch into a separate `.spec` DSL.
 
-## Interaction Pattern
+## Interview Pattern
+
+Use this sequence only while intent remains unsettled:
 
 1. Detect plan/spec wording.
 2. Ask whether the user wants help creating a spec for a recursive run.
@@ -136,7 +138,7 @@ Useful adaptation patterns:
 
 After the user approves the finished spec:
 
-1. create a new run with `recursive-init`
+1. create a new run with `.recursive/scripts/recursive-init.py` or `.recursive/scripts/recursive-init.ps1`
 2. replace the scaffolded `00-requirements.md`
 3. leave the run ready for Phase 0 / Phase 1 handoff
 

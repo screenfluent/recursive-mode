@@ -1,4 +1,4 @@
 interface:
   display_name: "Recursive Spec"
-  short_description: "Repo-aware requirements authoring for new runs"
-  default_prompt: "Use $recursive-spec to co-author a repo-aware 00-requirements.md for a new recursive-mode run."
+  short_description: "Author requirements for Recursive runs and deliveries"
+  default_prompt: "Use $recursive-spec to author or amend repo-aware requirements from the available context while preserving approval gates and native Recursive artifacts."
