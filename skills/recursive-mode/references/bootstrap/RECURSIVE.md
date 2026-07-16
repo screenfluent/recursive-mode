@@ -206,26 +206,18 @@ Sharding rules:
 - After a split, the parent doc becomes a summary/router and must not duplicate the full child content.
 - Split a memory doc when it covers mostly independent modules, broad invalidation keeps making it too noisy, or retrieval materially improves with narrower child docs.
 
-## Workflow Profiles
+## Current workflow contract
 
-New runs should declare:
+Recursive Mode has one current contract. Git history preserves superseded contracts; runtime tools do not carry compatibility branches for them. Adding a compatibility path requires an explicit human decision and evidence of a live consumer that cannot be migrated atomically.
 
-- `Workflow version: recursive-mode-audit-v2`
-
-Compatibility aliases:
-
-- `recursive-mode-audit-v1` for the earlier strict-audit profile
-- `memory-phase8` for the earlier phase8-aware workflow
-- legacy runs with no late-phase marker
-
-`recursive-mode-audit-v2` is the current stable profile. It keeps the audited-phase contract from v1 and adds a lossless Phase 1/Phase 2 handoff:
+The requirement guards are:
 
 - Phase 1 must include `## Source Requirement Inventory`
 - Phase 2 must include `## Requirement Mapping`
 - Phase 2 must include `## Plan Drift Check`
 - Phase 2 `## Requirement Completion Status` uses planning dispositions such as `planned`, `planned-via-merge`, and `planned-indirectly`
 
-`recursive-mode-audit-v1` remains supported for backward compatibility, but it does not require the stricter source-inventory and Phase 2 guardrail sections.
+Phase 2 also requires `## Test Surface` records and Phase 3 references to every effective `TS-*` record. This makes structural traceability machine-checkable while the phase audit judges whether the chosen behavior and seam are adequate.
 
 ## Recursive phases
 
@@ -245,17 +237,11 @@ The following are audited phases:
 - Phase 7 — State update
 - Phase 8 — Memory impact
 
-For every audited phase in `recursive-mode-audit-v1` and `recursive-mode-audit-v2`, the phase contract is:
+For every audited phase, the mandatory lifecycle is:
 
-1. Draft or revise the phase artifact.
-2. Re-read the effective upstream artifacts.
-3. Reconcile against the diff basis recorded in `00-worktree.md`.
-4. Run the phase audit.
-5. If gaps or drift remain, stay in the current phase.
-6. Repair the work.
-7. Re-run the audit.
-8. Only after `Audit: PASS` may `Coverage: PASS` and `Approval: PASS`.
-9. Only then may the artifact lock.
+`draft -> audit -> repair -> re-audit -> whole-ledger PASS -> Coverage -> Approval -> lock`
+
+Whole-ledger PASS from the canonical `recursive-review` ledger must precede `Coverage: PASS`, `Approval: PASS`, and lock. No prose audit-verdict gate exists.
 
 Mandatory audit recording for every audited phase:
 
@@ -309,7 +295,7 @@ Use `recursive-review-bundle` when possible to package the handoff. A valid bund
 
 Each audited phase stores one canonical current ledger at `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/ledger.md`, immutable completed snapshots at `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/passes/<NNNN>.md`, and one immutable same-pass bundle at `/.recursive/run/<run-id>/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`. The ledger is current operational state, pass snapshots are immutable history, and the bundle is reproducible review input rather than a second ledger.
 
-Every audited artifact has exactly one `## Review Metadata` section containing only these fields in order: `Review ID`, `Review Ledger Path`, `Latest Verified Pass`, `Latest Verified Pass Hash`, `Review Bundle Path`, `Review Bundle Hash`. The review ID is unique within the run, and every path, phase key, pass number, artifact address, and cited hash must agree across the artifact, ledger, pass, and bundle.
+Every audited artifact has exactly one `## Review Metadata` section containing only these fields in order: `Review ID`, `Review Ledger Path`, `Latest Verified Pass`, `Latest Verified Pass Hash`, `Review Bundle Path`, `Review Bundle Hash`. The review ID is unique within the run, and every path, phase key, pass number, artifact address, and cited hash must agree across the artifact, ledger, pass, and bundle. Phase 5 remains a QA-only, non-ledger phase and never receives `## Review Metadata`.
 
 Reviewer and self-audit output has exactly `## Review Scope`, `## Findings`, and `## Verdict`. Every technical issue is an append-only stable `F-*` record; previous IDs and immutable technical fields never disappear or change. `Depends on` names only a true repair prerequisite, forms an acyclic graph over existing findings, and permits `fixed` only after every dependency is itself `fixed`.
 
@@ -317,7 +303,7 @@ The reviewer creates findings as `open`. Repair agents may update only `Claimed 
 
 `scheduled` is available only inside an active run and only for work already owned by a strictly later canonical phase. It copies the full obligation into `/.recursive/run/<run-id>/evidence/reviews/scheduled/<owner-phase-key>/inventory.md`; a valid pending record makes that owner required, the owner consumes the record with controller evidence, and final verification rejects any pending record. Standalone review cannot schedule work.
 
-Before repair changes a reviewed surface, advance to the next working pass from the immediately preceding immutable snapshot, verify its normalized hash, preserve all terminal history, reset only open claims, and refresh the immutable bundle. Every changed diff byte, file membership or mode, artifact, or evidence reference requires that next pass; `/.recursive/scripts/recursive_review_surface.py` binds the current changed surface and local reviewed/evidence files without treating historical snapshots as current worktree claims.
+Before repair changes a reviewed surface, advance to the next working pass from the immediately preceding immutable snapshot, verify its normalized hash, preserve all terminal history, reset only open claims, and refresh the immutable bundle. Every changed diff byte, file membership or mode, artifact, or evidence reference requires that next pass; `/.recursive/scripts/recursive_review_surface.py` binds the current changed surface and local reviewed/evidence files without treating historical snapshots as current worktree claims. Explicit reviewed and evidence references must resolve directly to regular files; directories, symlinks, missing paths, and other non-regular references are invalid, while changed-surface symlinks bind their link state and target text.
 
 `recursive-review-bundle` auto-discovers relevant addenda by default. Do not silently omit them from delegated review context. The review scope cites the bundle plus its grounded upstream artifacts, addenda, changed files, code references, and evidence. Persisted repair/review action records cite the ledger, immutable bundle, and four-digit pass, and contain only sorted claims for existing open findings; `/.recursive/scripts/recursive_review_action.py` owns that claim grammar.
 
@@ -373,9 +359,16 @@ Each action record must include:
 - claimed findings
 - verification handoff
 
+For review or repair in every audited phase, replace free-form claimed findings with:
+
+- `Review Ledger`, pointing at the canonical `recursive-review` ledger
+- repeated stable finding claims with `F-*`, `Claimed outcome: none|fixed|blocked`, claimed changed paths, and claimed verification
+
+These are subagent claims, not terminal dispositions. The controller verifies every row against the real diff, artifacts, owning contract, and named check before changing `Disposition`. Persisted review action records also cite their immutable bundle and four-digit pass. `/.recursive/scripts/recursive_review_action.py` is the shared claim parser used by generation, lint, and status. Its exact ordered `## Claimed Findings` grammar permits only the four context fields and sorted records with `Claimed outcome`, `Claimed changes`, and `Claimed verification`; residual prose, unknown or terminal fields, duplicate or reordered metadata, missing or terminal IDs, cross-ledger context, and manual tampering are invalid.
+
 For meaningful delegated work, the action record must not be content-free. A `none everywhere` action record is not sufficient evidence for a passing audited phase.
 
-For delegated review and audit, `Current Artifact` should normally point at the stable artifact the subagent actually reviewed, not a mutable controller-authored phase receipt that will keep changing after the subagent returns. If the referenced artifact changes materially after the subagent worked, refresh the action record before relying on it for lockable evidence.
+For delegated review and audit, `Current Artifact` should normally point at the stable artifact the subagent actually reviewed, not a mutable controller-authored phase receipt that will keep changing after the subagent returns. If the referenced artifact changes after the subagent worked, refresh the action record before relying on it for lockable evidence.
 
 If a phase materially used subagent work, the phase artifact must cite the reviewed action record paths in `## Subagent Contribution Verification` and must record whether the main agent accepted or rejected each one.
 
@@ -469,7 +462,7 @@ Phase 1 — AS-IS analysis
 - Output: `01-as-is.md`
 - Audit must reread earlier relevant run docs when they matter to the same subsystem, workflow, or architecture area
 - Audit must record which upstream artifacts and prior recursive evidence were reread
-- In `recursive-mode-audit-v2`, Phase 1 must include `## Source Requirement Inventory` so each source obligation is indexed with a source quote, normalized summary, and disposition before Phase 2 planning begins
+- Phase 1 must include `## Source Requirement Inventory` so each source obligation is indexed with a source quote, normalized summary, and disposition before Phase 2 planning begins
 - **TODO Requirement:** Phase artifact MUST include `## TODO` section with checkable items
 - **TODO Enforcement:** ALL TODO items must be checked off before locking
 
@@ -488,13 +481,13 @@ Phase 2 — TO-BE plan (ExecPlan-grade)
 - If Phase 1.5 exists: also input `01.5-root-cause.md` (plus addenda)
 - Output: `02-to-be-plan.md`
 - Audit must fail unless:
-  - every in-scope `R#` is planned in `recursive-mode-audit-v1`
-  - every Phase 1 source-inventory item is accounted for in `recursive-mode-audit-v2`
+  - every Phase 1 source-inventory item is accounted for
   - targeted files/modules are concrete
   - tests and QA coverage are concrete
   - expected change surface is concrete enough for later diff reconciliation
-- In `recursive-mode-audit-v2`, Phase 2 must include `## Requirement Mapping`, `## Plan Drift Check`, and plan-stage `## Requirement Completion Status`
-- In `recursive-mode-audit-v2`, vague umbrella restatements are invalid unless `## Requirement Mapping` explicitly records the covered source-inventory items and any merge rationale
+- Phase 2 must include `## Requirement Mapping`, `## Plan Drift Check`, and plan-stage `## Requirement Completion Status`
+- Phase 2 must include `## Test Surface` using the canonical `TS-*` row schema below; every planned R# must have at least one row
+- Vague umbrella restatements are invalid unless `## Requirement Mapping` explicitly records the covered source-inventory items and any merge rationale
 - Phase 2 owns planning completeness plus the expected product/worktree change surface only; later `/.recursive/DECISIONS.md`, `/.recursive/STATE.md`, and `/.recursive/memory/**` churn must not retroactively invalidate a locked Phase 2 artifact
 - **TODO Requirement:** Phase artifact MUST include `## TODO` section with checkable items
 - **TODO Enforcement:** ALL TODO items must be checked off before locking
@@ -507,7 +500,8 @@ Phase 3 — Implementation (TDD discipline)
 - Strict mode is the default and requires explicit RED and GREEN evidence paths under `/.recursive/run/<run-id>/evidence/`
 - Pragmatic mode is allowed only with an explicit exception rationale plus compensating validation evidence
 - Must include TDD Compliance Log documenting RED-GREEN-REFACTOR cycles or the explicit pragmatic exception
-- All requirements must have tests written before implementation
+- Every effective Phase 2 `TS-*` record must be cited in the TDD Compliance Log or the explicit pragmatic exception; Phase 3 may not invent a test seam
+- All planned behaviors must have tests written before implementation at their approved seams
 - Audit must reconcile:
   - `00-requirements.md`
   - `02-to-be-plan.md`
@@ -525,9 +519,14 @@ Phase 3.5 — Code Review (optional but fully audited when present)
 - Delegated review is valid only with the full context bundle
 - Before delegated dispatch, re-read `/.recursive/config/recursive-router.json` and `/.recursive/config/recursive-router-discovered.json` as required by `## Canonical router policy for delegated model calls`
 - Prefer a canonical review bundle under `/.recursive/run/<run-id>/evidence/review-bundles/` and record its path in the phase artifact
+- Use `recursive-review` with a canonical ledger at `/.recursive/run/<run-id>/evidence/reviews/phase-3-5/<review-id>/ledger.md`
+- Under `## Review Metadata`, record `Review Ledger Path`, `Latest Verified Pass`, and `Latest Verified Pass Hash`; the phase artifact points to findings instead of duplicating them
 - `## Changed Files Reviewed` must not be empty, and `## Targeted Code References` should overlap the changed-file scope being reviewed
 - Audit must explicitly review requirements, plan alignment, product/worktree diff ownership, code quality, test adequacy, and TDD compliance
-- If blocking issues remain, this phase must FAIL and send the run back to Phase 3 repair
+- Reviewer output has exactly `## Review Scope`, `## Findings`, and `## Verdict`; every technical issue is an append-only stable `F-*` record
+- The entire ledger must have controller-verified terminal dispositions before PASS. Any open finding sends the run back to Phase 3 repair, regardless of label or perceived priority
+- Any change to the reviewed diff, artifact, or evidence basis requires a refreshed bundle and next review pass before re-audit
+- A `scheduled` finding may target only a later owner from the canonical phase rules and must copy its obligation into `/.recursive/run/<run-id>/evidence/reviews/scheduled/<owner-phase-key>/inventory.md`; a valid pending record makes even an absent optional owner required and due without precreating it, while the target lock and final verification reject pending records
 - **TODO Requirement:** Phase artifact MUST include `## TODO` section with checkable items
 - **TODO Enforcement:** ALL TODO items must be checked off before locking
 - Must be LOCKED before Phase 4 if present
@@ -590,7 +589,7 @@ Recursive prompts must be concise and path-based. A good prompt:
 - names the phase,
 - names the input file path(s),
 - names the required output file path(s),
-- instructs the agent to enforce Audit, Coverage, and Approval gates when applicable,
+- instructs the agent to enforce the audit loop, whole-ledger PASS, and the Coverage and Approval gates when applicable,
 - avoids pasting substantive content.
 
 Example prompt pattern:
@@ -601,17 +600,7 @@ Example prompt pattern:
 
 Every per-run recursive-mode artifact (`00-requirements.md` through `08-memory-impact.md`, plus any addendum files) must begin with a short header and must end with Coverage and Approval gates.
 
-For audited phases in `recursive-mode-audit-v1` and `recursive-mode-audit-v2`, the artifact must also contain explicit audit sections before Coverage and Approval, including:
-
-- `## Audit Context`
-- `## Effective Inputs Re-read`
-- `## Earlier Phase Reconciliation`
-- `## Subagent Contribution Verification`
-- `## Worktree Diff Audit`
-- `## Gaps Found`
-- `## Repair Work Performed`
-- `## Requirement Completion Status`
-- `## Audit Verdict`
+Audited artifacts preserve the author-evidence sections (`Audit Context`, `Effective Inputs Re-read`, `Earlier Phase Reconciliation`, `Subagent Contribution Verification`, `Worktree Diff Audit`, and `Requirement Completion Status`) and use the exact six-field `## Review Metadata` pointer schema. Findings live only in the canonical ledger.
 
 The following phases must also include `## Prior Recursive Evidence Reviewed`:
 
@@ -621,7 +610,7 @@ The following phases must also include `## Prior Recursive Evidence Reviewed`:
 - Phase 7
 - Phase 8
 
-Additional v2-only required sections:
+Additional required sections:
 
 - Phase 1 must include `## Source Requirement Inventory`
 - Phase 2 must include `## Requirement Mapping`
@@ -691,7 +680,7 @@ Inside `## Requirement Completion Status`, list every in-scope requirement or so
 - `R5 | Status: blocked | Rationale: [why] | Blocking Evidence: /path/to/log, /path/to/artifact`
 - `R6 | Status: superseded by approved addendum | Addendum: /.recursive/run/<run-id>/addenda/...`
 
-In `recursive-mode-audit-v2` Phase 2, use planning dispositions instead of implementation dispositions:
+In Phase 2, use planning dispositions instead of implementation dispositions:
 
 - `R1 | Status: planned | Implementation Surface: /path/to/file | Verification Surface: /path/to/test-or-artifact | QA Surface: /path/to/manual-qa-or-scenario`
 - `SRC-001 | Status: planned-via-merge | Implementation Surface: /path/to/file | Verification Surface: /path/to/test-or-artifact | QA Surface: not-applicable-with-rationale | Rationale: [why the merge is lossless]`
@@ -740,7 +729,7 @@ The Coverage Gate must conclude with one of:
 
 For audited phases:
 
-- `Coverage: PASS` is invalid unless `Audit: PASS`.
+- `Coverage: PASS` is invalid unless the canonical review ledger has whole-ledger PASS.
 - If any in-scope `R#` is unmapped, Coverage must be `FAIL`.
 - If upstream reconciliation is incomplete, Coverage must be `FAIL`.
 
@@ -757,7 +746,7 @@ The Approval Gate must conclude with one of:
 
 For audited phases:
 
-- `Approval: PASS` is invalid unless `Audit: PASS`.
+- `Approval: PASS` is invalid unless the canonical review ledger has whole-ledger PASS.
 - Approval must be `FAIL` if unresolved in-scope gaps remain.
 - Approval must be `FAIL` if unexplained diff drift remains.
 - Approval must be `FAIL` if a required audit section is missing.
@@ -806,11 +795,11 @@ Use `.recursive/scripts/verify-locks.py` (cross-platform) or `.recursive/scripts
 
 **Bash (GNU coreutils):**
 
-    sed '/^LockHash:/d' /.recursive/run/<run-id>/01-as-is.md | tr -d '\r' | sha256sum
+    sed '/^LockHash:/d' ./.recursive/run/<run-id>/01-as-is.md | tr -d '\r' | sha256sum
 
 **PowerShell (Windows PowerShell 5.1 / PowerShell 7+):**
 
-    $p = "/.recursive/run/<run-id>/01-as-is.md"
+    $p = "./.recursive/run/<run-id>/01-as-is.md"
     $t = Get-Content -LiteralPath $p -Raw -Encoding UTF8
     $n = ($t -replace "`r`n","`n") -replace "(?m)^LockHash:.*(?:`n|$)",""
     $b = [System.Text.Encoding]::UTF8.GetBytes($n)
@@ -905,7 +894,7 @@ Every downstream artifact must include a short "Traceability" section that maps 
 
 If a requirement is deferred, it must be explicitly marked as deferred with rationale and its impact on acceptance.
 
-For `recursive-mode-audit-v1`, audited phases must also record:
+Audited phases must also record:
 
 - which upstream artifacts were re-read
 - which prior recursive run docs were reviewed when relevant
@@ -944,6 +933,7 @@ Phase 2 — `02-to-be-plan.md` (ExecPlan-grade)
   - manual QA scenarios
   - idempotence/recovery guidance
 - Must include traceability mapping R# -> planned change + validation
+- Must include the compact `## Test Surface` records defined below
 
 Phase 6 — `06-decisions-update.md`
 - Exact `DECISIONS.md` edits made for the run
@@ -1219,6 +1209,22 @@ Tier A for a sub-phase must be able to target the sub-phase tests without manual
 
 If the repo's Playwright setup cannot reliably filter by tags, the Phase 2 plan must define an alternative (for example, file glob patterns that correspond to `recursive-<run-id>.sp<k>.*`), and must use that alternative consistently throughout Phase 3/5 execution and reporting.
 
+### Test Surface
+
+Phase 2 records one row for each required combination of requirement, observable behavior, and public seam. One R# may have multiple rows. Keep the section compact; it is an index for execution and audit, not a second test plan.
+
+```markdown
+## Test Surface
+
+- `TS-001` | Requirement: `R1` | Behavior: rejects an expired session | Seam: `AuthService.authenticate(request) -> AuthResult` | Level: integration | Real Dependencies: `TokenStore` | Replaced Dependencies: `Clock` via injected port | Expected From: `R1` acceptance criterion: expired sessions are rejected
+```
+
+The exact fields are `Requirement`, `Behavior`, `Seam`, `Level`, `Real Dependencies`, `Replaced Dependencies`, and `Expected From`. `Level` is `unit`, `integration`, `contract`, or `e2e`. Use `none` when a dependency class is empty. A later Phase 2 addendum may replace a stable `TS-*` record by redeclaring the same ID; otherwise rows are additive.
+
+Approval of Phase 2 confirms every new or changed seam. Existing unchanged seams may be cited. Phase 3 may not invent a test seam: route a new seam through the appropriate Phase 2 addendum and human gate.
+
+Mechanical lint proves record structure, planned-R# coverage, and Phase 3 references. It does not prove semantic adequacy; the Phase 2 and Phase 3 audits must judge whether each behavior, seam, level, dependency choice, and expected value source are appropriate.
+
 
 ### Testing discipline (TDD + Playwright) - Phase 2 (TO-BE plan) must include a "Testing Strategy" section that specifies:
 
@@ -1235,8 +1241,10 @@ Phase 3 — `03-implementation-summary.md`
 
 ### Testing discipline (TDD + Playwright) - Phase 3 (Implementation) must begin with tests-first:
 
-- Bug fixes: add a failing regression test first, then implement until it passes.
-- Features: add tests for the new behavior first (may fail initially), then implement until they pass.
+- Work one `TS-*` tracer bullet at a time: focused RED, minimal GREEN, bounded REFACTOR, then the next ready behavior.
+- Bug fixes: add a failing regression test at the approved seam, then implement until it passes.
+- Features: add a failing behavior test at the approved seam, then implement until it passes.
+- Record `Test Surface: TS-*` in each strict TDD cycle.
 
 Phase 4 - `04-test-summary.md`
 - Tests executed (commands)
@@ -1611,7 +1619,7 @@ Phase 3 must declare `TDD Mode: strict|pragmatic`.
 - `strict` is the default and requires actual failing-test evidence before implementation plus passing-test evidence after implementation.
 - `pragmatic` is allowed only when the artifact records a concrete exception reason and compensating validation evidence.
 
-Every requirement implemented in strict Phase 3 must follow RED-GREEN-REFACTOR discipline:
+Every planned behavior implemented in strict Phase 3 must follow RED-GREEN-REFACTOR discipline at its approved `TS-*` seam. Grow one vertical tracer bullet at a time rather than batching speculative tests horizontally.
 
 #### RED Phase
 1. Write one minimal test showing what should happen
@@ -1626,10 +1634,11 @@ Every requirement implemented in strict Phase 3 must follow RED-GREEN-REFACTOR d
 4. Document minimal implementation in Phase 3 artifact
 
 #### REFACTOR Phase
-1. Clean up: remove duplication, improve names, extract helpers
-2. Keep tests green throughout
-3. Never add behavior during refactor
-4. Document cleanups in Phase 3 artifact
+1. Begin only after GREEN
+2. Perform a bounded refactor: remove local duplication, improve names, or simplify the just-green path
+3. Keep behavior and tests green inside the approved seam and plan
+4. Route any change to behavior, seam, interface, dependency placement, module ownership, or plan scope through the appropriate design/addendum owner or a lossless review finding
+5. Document the cleanup and verification command, or record `N/A`
 
 ### Common Process Shortcuts (STOP)
 
@@ -1658,6 +1667,8 @@ GREEN Evidence:
 
 ### R1: [requirement description]
 
+Test Surface: `TS-001`
+
 **Test:** `path/to/test.spec.ts` - "[test name]"
 
 **RED Phase** ([ISO8601]):
@@ -1673,7 +1684,8 @@ GREEN Evidence:
 - GREEN verified: ✅
 
 **REFACTOR Phase** ([ISO8601]):
-- Cleanups: [description]
+- Bounded refactor: [description or N/A]
+- Scope check: behavior and approved seam/plan unchanged
 - All tests passing: ✅
 ```
 
@@ -1682,6 +1694,7 @@ If `TDD Mode: pragmatic` is used, the artifact must also contain:
 ```markdown
 ## Pragmatic TDD Exception
 
+Test Surface: `TS-001`
 Exception reason: [why strict RED-first flow was not feasible here]
 Compensating validation:
 - [what was done instead]
@@ -1807,7 +1820,7 @@ A phase artifact is **lock-valid** only when ALL of the following are true:
 3. **LockedAt is present** and is valid ISO8601 timestamp
 4. **LockHash is present** and is 64-character hex string
 5. **LockHash matches** SHA-256 of normalized artifact content (LF newlines; `LockHash:` line removed)
-6. **If the artifact is an audited phase in `recursive-mode-audit-v1`, Audit Gate ends with:** `Audit: PASS`
+6. **If the artifact is audited, its canonical review ledger has whole-ledger PASS.**
 7. **Coverage Gate ends with:** `Coverage: PASS`
 8. **Approval Gate ends with:** `Approval: PASS`
 
@@ -1828,13 +1841,13 @@ python ./.recursive/scripts/verify-locks.py --run-id "<run-id>" --fix
 
 ```powershell
 # Verify specific run
-.\.agents\skills\recursive-mode\scripts\verify-locks.ps1 -RunId "<run-id>"
+.\.recursive\scripts\verify-locks.ps1 -RunId "<run-id>"
 
 # Scan all runs
-.\.agents\skills\recursive-mode\scripts\verify-locks.ps1
+.\.recursive\scripts\verify-locks.ps1
 
 # Fix incorrect hashes (use with caution)
-.\.agents\skills\recursive-mode\scripts\verify-locks.ps1 -RunId "<run-id>" -Fix
+.\.recursive\scripts\verify-locks.ps1 -RunId "<run-id>" -Fix
 ```
 
 ### Tampering Detection
@@ -1864,7 +1877,7 @@ Phase 0 (Requirements) -> Phase 0 (Worktree) -> Phase 1 (AS-IS) -> ...
 
 When user invokes "Implement requirement 'run-id'":
 
-1. Scan all phases (0 through 6)
+1. Scan all phases (0 through 8)
 2. Check each locked artifact's hash
 3. Identify earliest non-lock-valid phase
 4. Resume from that phase
@@ -1876,7 +1889,7 @@ Phase 0 Worktree: ✅ LOCKED (valid hash)
 Phase 1: ❌ DRAFT (incomplete)
 Phase 1-5: ⏳ PENDING
 
-Resuming Phase 2...
+Resuming Phase 1...
 ```
 
 ---
@@ -1956,7 +1969,7 @@ Hard gates are marked with <HG> tags and use absolute language:
 <HG>
 Do NOT proceed to next phase until:
 - Current phase artifact is complete
-- If the phase is audited, `Audit: PASS`
+- If the phase is audited, its canonical review ledger has whole-ledger PASS
 - Coverage Gate: PASS
 - Approval Gate: PASS
 - Status: LOCKED with LockedAt and LockHash
@@ -1996,7 +2009,7 @@ Do NOT proceed to Phase 1 or 2 until Phase 0 is LOCKED with:
 
 <HG>
 Do NOT create 02-to-be-plan.md until 01-as-is.md is LOCKED with:
-- Audit: PASS
+- Canonical review ledger: whole-ledger PASS
 - Coverage: PASS
 - Approval: PASS
 - LockedAt and LockHash populated
@@ -2011,7 +2024,7 @@ Do NOT create TO-BE plan until root cause analysis is complete:
 - Phase 1.5 artifact is LOCKED
 - Root cause identified (not just symptom)
 - Fix strategy defined
-- Audit: PASS
+- Canonical review ledger: whole-ledger PASS
 - Coverage: PASS
 - Approval: PASS
 
@@ -2036,7 +2049,7 @@ Do NOT write implementation code until:
 <HG>
 Do NOT proceed to Manual QA until:
 - Implementation audit is documented in Phase 4 artifact (against `00-requirements.md` and `02-to-be-plan.md`)
-- Phase 4 audit verdict is PASS
+- Phase 4 canonical review ledger has whole-ledger PASS
 - All tests from Phase 3 are passing
 - TDD Compliance is verified
 - Test evidence is documented in Phase 4 artifact
@@ -2087,14 +2100,14 @@ Do NOT begin memory maintenance until:
 ### HG-8: Phase 8 Completion Hard Gate
 
 <HG>
-Do NOT consider a `recursive-mode-audit-v1` run complete until:
+Do NOT consider a recursive run complete until:
 - `08-memory-impact.md` is lock-valid
 - affected memory docs were reviewed or explicitly left `SUSPECT` / `STALE`
 - uncovered changed paths were handled explicitly
 - run-local skill usage was captured and any durable promotion decision was recorded when skill usage was relevant
-- Phase 8 ends with `Audit: PASS`
+- Phase 8's canonical review ledger has whole-ledger PASS
 
-**Exception:** Compatibility profiles may remain complete under their own documented contract.
+**Exception:** None.
 </HG>
 
 ### HG-9: Lock Chain Hard Gate (Universal)
@@ -2104,7 +2117,7 @@ Do NOT start Phase N unless ALL prior phases (0 through N-1) are lock-valid:
 - Status: LOCKED
 - LockedAt: populated
 - LockHash: matches SHA-256 of content
-- Audited prior phases end with `Audit: PASS`
+- Audited prior phases have canonical whole-ledger PASS
 - Coverage: PASS
 - Approval: PASS
 
@@ -2232,16 +2245,15 @@ When relevant addenda exist, the orchestrator must also re-read and reconcile th
 
 Before the orchestrator starts or resumes Phase `N` (`N >= 3`), it must validate that every required prior phase is lock-valid.
 
-Required prior artifacts by phase:
+Immediate predecessor by phase is shown below for orientation. Runtime validation also checks every earlier phase that is present or activated:
 
 - Phase 2: `01-as-is.md`
-- Phase 2: `02-to-be-plan.md`
-- Phase 3: `03-implementation-summary.md`
-- Phase 4: `04-test-summary.md`
-- Phase 5: `05-manual-qa.md`
-- Phase 6: `06-decisions-update.md`
-- Phase 7: `07-state-update.md`
-- Phase 8: `08-memory-impact.md`
+- Phase 3: `02-to-be-plan.md`
+- Phase 4: `03-implementation-summary.md`
+- Phase 5: `04-test-summary.md`
+- Phase 6: `05-manual-qa.md`
+- Phase 7: `06-decisions-update.md`
+- Phase 8: `07-state-update.md`
 
 A phase artifact is lock-valid only if all checks pass:
 
@@ -2249,7 +2261,7 @@ A phase artifact is lock-valid only if all checks pass:
 2) The header contains `Status: LOCKED`.
 3) The header contains non-empty `LockedAt`.
 4) The header contains non-empty `LockHash`.
-5) If the artifact is an audited phase in `recursive-mode-audit-v1`, it ends with `Audit: PASS`.
+5) If the artifact is audited, its canonical review ledger has whole-ledger PASS.
 6) The artifact ends with `Coverage: PASS` and `Approval: PASS`.
 7) Any stage-local addenda for that phase (`addenda/<base>.addendum-*.md`) also satisfy the same required checks for that phase.
 
@@ -2301,7 +2313,7 @@ Scoped exception:
 
 For each phase artifact created or updated, the orchestrator must enforce:
 
-- Audit Gate: required for audited phases. The artifact must end with `Audit: PASS` or `Audit: FAIL`.
+- Review ledger gate: audited phases require a controller-verified whole-ledger PASS before Coverage, Approval, or lock.
 - Coverage Gate: PASS only if the output covers everything relevant in the effective inputs (including addenda), proven via Requirement IDs (R1, R2, …).
 - Approval Gate: PASS only if phase readiness criteria are met.
 
@@ -2310,7 +2322,7 @@ For audited phases:
 - run the audit after drafting the phase
 - if audit finds gaps or drift, repair inside the same phase
 - rerun the audit
-- do not allow `Coverage: PASS` or `Approval: PASS` unless `Audit: PASS`
+- do not allow `Coverage: PASS` or `Approval: PASS` unless the canonical review ledger has whole-ledger PASS
 
 If any required gate is FAIL, the orchestrator must iterate within the same phase until the phase is truly ready, then lock and proceed.
 
@@ -2342,7 +2354,6 @@ If the orchestrator discovers missing or incorrect information in a LOCKED earli
 To start a recursive-mode run:
 
 1) Create `/.recursive/run/<run-id>/00-requirements.md` and ensure it contains requirement IDs (R1, R2, …) and acceptance criteria.
-   - New runs should also include `Workflow version: recursive-mode-audit-v2`.
 2) Invoke: Implement requirement '<run-id>'
 
 Equivalent short commands are also valid when the repository already contains enough information to resolve the run or source plan:
@@ -2360,16 +2371,6 @@ To continue after Manual QA:
 1) Run the requested QA scenarios.
 2) Provide results in chat (pass/fail notes per scenario).
 3) Invoke again: Implement requirement '<run-id>' and complete through Phase 8.
-
-## Legacy compatibility
-
-Older runs are not blindly retrofitted.
-
-- Runs with `Workflow version: recursive-mode-audit-v1` in `00-requirements.md` use the strict audit-loop workflow and must satisfy the audited-phase rules in this document.
-- Runs with `Workflow version: memory-phase8` in `00-requirements.md` are phase8-aware compatibility runs and must complete through `06-decisions-update.md`, `07-state-update.md`, and `08-memory-impact.md`.
-- Runs that already contain any of the `06/07/08` receipt artifacts are also treated as phase8-aware runs.
-- Runs with no phase8 marker and no late-phase receipts may be treated as legacy runs by tooling and are not required to backfill the new receipt artifacts automatically.
-- When a legacy run is explicitly resumed under the new strict workflow, add `Workflow version: recursive-mode-audit-v2` to `00-requirements.md` so tools can enforce the stronger contract.
 
 <!-- RECURSIVE-MODE-SKILL:START -->
 ## recursive-mode skill integration

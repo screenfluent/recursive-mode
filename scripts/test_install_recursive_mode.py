@@ -181,41 +181,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
             ).exists()
         )
 
-    def test_current_workflow_docs_default_to_v2(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        expectations = {
-            Path(".recursive/STATE.md"): (
-                "The workflow profile in active use is `recursive-mode-audit-v2`.",
-            ),
-            Path(".recursive/RECURSIVE.md"): (
-                "New runs should also include `Workflow version: recursive-mode-audit-v2`.",
-                "add `Workflow version: recursive-mode-audit-v2` to `00-requirements.md`",
-            ),
-            Path("skills/recursive-mode/references/bootstrap/RECURSIVE.md"): (
-                "New runs should also include `Workflow version: recursive-mode-audit-v2`.",
-                "add `Workflow version: recursive-mode-audit-v2` to `00-requirements.md`",
-            ),
-            Path("docs/templates/commands/recursive-init.md"): (
-                "Marks the run as `recursive-mode-audit-v2`",
-            ),
-            Path("docs/templates/commands/recursive-status.md"): (
-                "Workflow Profile: recursive-mode-audit-v2",
-            ),
-            Path("skills/recursive-mode/references/artifact-template.md"): (
-                "Use this block in every audited phase for `recursive-mode-audit-v1` and `recursive-mode-audit-v2`:",
-                "Workflow version: `recursive-mode-audit-v2`",
-            ),
-            Path("references/fixtures/tiny-tasks-smoke-recipe.md"): (
-                "- Workflow profile: `recursive-mode-audit-v2`",
-            ),
-        }
-
-        for relative_path, required_snippets in expectations.items():
-            content = (repo_root / relative_path).read_text(encoding="utf-8")
-            for snippet in required_snippets:
-                with self.subTest(path=str(relative_path), snippet=snippet):
-                    self.assertIn(snippet, content)
-
     def test_root_docs_list_recursive_router_and_config_surface(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         readme = (repo_root / "README.md").read_text(encoding="utf-8")
