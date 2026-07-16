@@ -1,0 +1,6 @@
+interface:
+  display_name: "Recursive Handoff"
+  short_description: "Prepare safe cross-session handoffs"
+  default_prompt: "Use $recursive-handoff to prepare this work for a fresh session."
+policy:
+  allow_implicit_invocation: true
