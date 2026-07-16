@@ -54,6 +54,7 @@ class InstallRecursiveModeTests(unittest.TestCase):
                 "recursive-architecture-survey",
                 "recursive-debugging",
                 "recursive-codebase-design",
+                "recursive-delivery-slicing",
                 "recursive-domain-modeling",
                 "recursive-grilling",
                 "recursive-handoff",

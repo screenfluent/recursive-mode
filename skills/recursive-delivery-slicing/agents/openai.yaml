@@ -1,0 +1,7 @@
+interface:
+  display_name: "Recursive Delivery Slicing"
+  short_description: "Shape and continue multi-run deliveries"
+  default_prompt: "Use $recursive-delivery-slicing to split this approved multi-run specification into a delivery DAG."
+
+policy:
+  allow_implicit_invocation: true
