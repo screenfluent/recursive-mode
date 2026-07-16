@@ -544,7 +544,7 @@ Resolution rule:
 Spec-authoring rule:
 
 - If the user asks to create a plan, help plan, create a spec, or write requirements for a new recursive run, prefer `recursive-spec` before orchestration.
-- `recursive-spec` should confirm the user wants spec help, ask what they want to do, read `STATE.md`, `DECISIONS.md`, `MEMORY.md`, and relevant code/tests, keep the draft in temporary non-repo storage, then create the new run only after the requirements are approved.
+- Let the installed `recursive-spec` skill choose its authoring branch from current evidence; do not force a new interview when the conversation or an approved promotion already settles the requirements.
 
 Benchmark rule:
 
