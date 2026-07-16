@@ -85,6 +85,36 @@ class TestPhaseSequence(unittest.TestCase):
         self.assertTrue(rules.is_core_artifact("08-memory-impact.md"))
         self.assertFalse(rules.is_core_artifact("random-file.md"))
 
+    def test_audited_registry_round_trips_all_nine_phases(self):
+        expected = {
+            "01-as-is.md": "phase-1",
+            "01.5-root-cause.md": "phase-1-5",
+            "02-to-be-plan.md": "phase-2",
+            "03-implementation-summary.md": "phase-3",
+            "03.5-code-review.md": "phase-3-5",
+            "04-test-summary.md": "phase-4",
+            "06-decisions-update.md": "phase-6",
+            "07-state-update.md": "phase-7",
+            "08-memory-impact.md": "phase-8",
+        }
+        self.assertEqual(dict(rules.AUDITED_PHASE_REGISTRY), expected)
+        self.assertEqual(rules.AUDITED_ARTIFACTS, frozenset(expected))
+        for artifact, phase_key in expected.items():
+            with self.subTest(artifact=artifact):
+                self.assertTrue(rules.is_audited_artifact(artifact))
+                self.assertEqual(rules.audited_phase_key(artifact), phase_key)
+                self.assertEqual(rules.audited_artifact_for_key(phase_key), artifact)
+        self.assertFalse(rules.is_audited_artifact("05-manual-qa.md"))
+        self.assertIsNone(rules.audited_phase_key("unknown.md"))
+        self.assertIsNone(rules.audited_artifact_for_key("phase-unknown"))
+        self.assertEqual(rules.audited_phase_key_from_label("Phase 3.5 Code Review"), "phase-3-5")
+        self.assertEqual(rules.audited_phase_key_from_label("08 Memory Impact"), "phase-8")
+        self.assertIsNone(rules.audited_phase_key_from_label("05 Manual QA"))
+        self.assertEqual(
+            rules.later_audited_artifacts("03.5-code-review.md"),
+            ["04-test-summary.md", "06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"],
+        )
+
 
 # ---------------------------------------------------------------------------
 # Lock-hash helpers

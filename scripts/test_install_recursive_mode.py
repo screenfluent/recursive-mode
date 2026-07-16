@@ -419,8 +419,13 @@ class InstallRecursiveModeTests(unittest.TestCase):
                 "verify-locks.py",
                 "recursive-closeout.py",
                 "recursive-review-bundle.py",
+                "recursive-review-ledger.py",
+                "recursive-review-ledger.ps1",
                 "recursive-subagent-action.py",
                 "recursive_phase_rules.py",
+                "recursive_review_action.py",
+                "recursive_review_ledger.py",
+                "recursive_review_surface.py",
                 "recursive_router_lib.py",
             ):
                 with self.subTest(script_name=script_name):
@@ -686,6 +691,9 @@ class InstallRecursiveModeTests(unittest.TestCase):
         self.assertIn('Join-Path $memoryRoot "training"', ps1_script)
         self.assertIn('$_.Name.StartsWith("recursive-")', ps1_script)
         self.assertIn('"recursive_phase_rules.py"', ps1_script)
+        self.assertIn('"recursive_review_action.py"', ps1_script)
+        self.assertIn('"recursive_review_ledger.py"', ps1_script)
+        self.assertIn('"recursive_review_surface.py"', ps1_script)
         self.assertIn('Join-Path $recursiveRoot "scripts"', ps1_script)
 
     def test_packaged_powershell_scripts_parse(self) -> None:

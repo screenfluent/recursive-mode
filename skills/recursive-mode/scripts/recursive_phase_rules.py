@@ -48,6 +48,27 @@ OPTIONAL_PHASES: frozenset[str] = frozenset(
 
 MANDATORY_PHASES: frozenset[str] = frozenset(set(PHASE_SEQUENCE) - OPTIONAL_PHASES)
 
+# One canonical registry for phases that own lossless Recursive Review ledgers.
+AUDITED_PHASE_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("01-as-is.md", "phase-1"),
+    ("01.5-root-cause.md", "phase-1-5"),
+    ("02-to-be-plan.md", "phase-2"),
+    ("03-implementation-summary.md", "phase-3"),
+    ("03.5-code-review.md", "phase-3-5"),
+    ("04-test-summary.md", "phase-4"),
+    ("06-decisions-update.md", "phase-6"),
+    ("07-state-update.md", "phase-7"),
+    ("08-memory-impact.md", "phase-8"),
+)
+AUDITED_ARTIFACTS: frozenset[str] = frozenset(artifact for artifact, _phase_key in AUDITED_PHASE_REGISTRY)
+_AUDITED_ARTIFACT_TO_KEY: dict[str, str] = dict(AUDITED_PHASE_REGISTRY)
+_AUDITED_KEY_TO_ARTIFACT: dict[str, str] = {phase_key: artifact for artifact, phase_key in AUDITED_PHASE_REGISTRY}
+_AUDITED_NUMBER_TO_KEY: dict[str, str] = {}
+for _artifact, _phase_key in AUDITED_PHASE_REGISTRY:
+    _number = _artifact.split("-", 1)[0]
+    _AUDITED_NUMBER_TO_KEY[_number] = _phase_key
+    _AUDITED_NUMBER_TO_KEY[_number.lstrip("0")] = _phase_key
+
 # Lock receipts live in this subdirectory of the run directory.
 LOCKS_SUBDIR = "locks"
 RECEIPT_SUFFIX = ".receipt.json"
@@ -88,6 +109,40 @@ def phase_index(artifact_file: str) -> int:
 def is_core_artifact(artifact_file: str) -> bool:
     """Return True if artifact_file is a known core phase artifact."""
     return artifact_file in PHASE_SEQUENCE
+
+
+def is_audited_artifact(artifact_file: str) -> bool:
+    """Return True when ``artifact_file`` owns a lossless review ledger."""
+    return artifact_file in AUDITED_ARTIFACTS
+
+
+def audited_phase_key(artifact_file: str) -> str | None:
+    """Map an audited artifact filename to its canonical review phase key."""
+    return _AUDITED_ARTIFACT_TO_KEY.get(artifact_file)
+
+
+def audited_artifact_for_key(phase_key: str) -> str | None:
+    """Map a canonical review phase key back to its audited artifact filename."""
+    return _AUDITED_KEY_TO_ARTIFACT.get(phase_key)
+
+
+def audited_phase_key_from_label(label: str) -> str | None:
+    """Resolve an audited artifact, phase key, or human phase label to its registry key."""
+    normalized = label.strip().lower()
+    if normalized in _AUDITED_ARTIFACT_TO_KEY:
+        return _AUDITED_ARTIFACT_TO_KEY[normalized]
+    if normalized in _AUDITED_KEY_TO_ARTIFACT:
+        return normalized
+    match = re.match(r"^(?:phase[\s_-]*)?(0?1(?:[.]5)?|0?2|0?3(?:[.]5)?|0?4|0?6|0?7|0?8)(?=$|[\s_-])", normalized)
+    return _AUDITED_NUMBER_TO_KEY.get(match.group(1)) if match else None
+
+
+def later_audited_artifacts(artifact_file: str) -> list[str]:
+    """Return audited artifacts strictly later than ``artifact_file`` in phase order."""
+    source_index = phase_index(artifact_file)
+    if source_index < 0:
+        return []
+    return [artifact for artifact in PHASE_SEQUENCE[source_index + 1:] if artifact in AUDITED_ARTIFACTS]
 
 
 # ---------------------------------------------------------------------------

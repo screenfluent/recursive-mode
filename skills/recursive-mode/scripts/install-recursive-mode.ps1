@@ -827,7 +827,14 @@ $runtimeScripts = Get-ChildItem -LiteralPath $skillScriptsDir -File | Where-Obje
     $_.Name.StartsWith("recursive-") -or
     $_.Name.StartsWith("lint-") -or
     $_.Name.StartsWith("verify-") -or
-    $_.Name -in @("recursive_phase_rules.py", "recursive_router_cli_lib.py", "recursive_router_lib.py")
+    $_.Name -in @(
+      "recursive_phase_rules.py",
+      "recursive_review_action.py",
+      "recursive_review_ledger.py",
+      "recursive_review_surface.py",
+      "recursive_router_cli_lib.py",
+      "recursive_router_lib.py"
+    )
   )
 } | Sort-Object Name
 foreach ($scriptFile in $runtimeScripts) {

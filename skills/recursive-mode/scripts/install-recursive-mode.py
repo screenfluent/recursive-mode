@@ -649,7 +649,14 @@ def main() -> None:
             path.name.startswith("recursive-")
             or path.name.startswith("lint-")
             or path.name.startswith("verify-")
-            or path.name in {"recursive_phase_rules.py", "recursive_router_cli_lib.py", "recursive_router_lib.py"}
+            or path.name in {
+                "recursive_phase_rules.py",
+                "recursive_review_action.py",
+                "recursive_review_ledger.py",
+                "recursive_review_surface.py",
+                "recursive_router_cli_lib.py",
+                "recursive_router_lib.py",
+            }
         )
     )
     for script_name in runtime_scripts:
