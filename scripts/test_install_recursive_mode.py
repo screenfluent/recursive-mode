@@ -67,6 +67,7 @@ class InstallRecursiveModeTests(unittest.TestCase):
                 "recursive-subagent",
                 "recursive-tdd",
                 "recursive-training",
+                "recursive-wayfinder",
                 "recursive-worktree",
             },
             installable_skills,
