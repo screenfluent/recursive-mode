@@ -355,10 +355,11 @@ Watch-Paths:
 - `/.recursive/RECURSIVE.md`
 - `/.recursive/memory/skills/SKILLS.md`
 - `/.recursive/run/`
+- `/skills/`
 Source-Runs:
 - `none (generic repository guidance)`
 Validated-At-Commit: `generic-repository-guidance`
-Last-Validated: `2026-04-09T00:00:00Z`
+Last-Validated: `2026-07-17T00:00:00Z`
 Tags:
 - `skills`
 - `subagent`
@@ -391,11 +392,25 @@ When delegated work materially contributes, `## Subagent Contribution Verificati
 
 ## Refresh Rule
 
-If repairs materially change the reviewed artifact, changed-file scope, or evidence basis, refresh the review bundle or action record before relying on delegated work for lockable evidence.
+Any reviewed-surface change to the artifact, changed-file scope, or evidence basis refreshes the immutable bundle, action record when used, and next ledger pass before relying on review evidence.
+
+## Forward-Test Model-Facing Skills
+
+A structural contract test proves files and declared rules, not model behavior. When a run adds or materially changes a model-facing skill:
+
+- give a fresh subagent a task-style prompt and the installed skill path;
+- omit the intended answer, suspected failure, and expected response shape;
+- preserve the exact prompt and raw response under run evidence;
+- have the controller check the response against the skill's observable interaction contract; and
+- refresh the review bundle and action records before re-audit when the forward test repairs missing evidence.
 
 ## Rejection Rule
 
 If the main agent cannot verify delegated claims against actual files, actual artifacts, and the actual diff scope, reject the delegated result and fall back to self-audit for lockable completion evidence.
+
+The controller must verify every finding row against the real diff, artifacts, owning contract, and named check. Delegated reports and repair results are candidate claims, never terminal proof.
+
+Memory is not a backlog and is not a deferral target. Known review obligations remain open, are fixed now, or use the protocol's human-approved tracked destination.
 """
 
 
