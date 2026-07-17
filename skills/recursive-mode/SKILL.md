@@ -88,6 +88,8 @@ If any bridge doc conflicts with `/.recursive/RECURSIVE.md`, follow `/.recursive
 - `scripts/lint-recursive-run.ps1`
 - `scripts/recursive-review-bundle.py`
 - `scripts/recursive-review-bundle.ps1`
+- `scripts/recursive-review-ledger.py`
+- `scripts/recursive-review-ledger.ps1`
 - `scripts/recursive-closeout.py`
 - `scripts/recursive-closeout.ps1`
 - `scripts/recursive-router-init.py`
@@ -130,6 +132,7 @@ If any bridge doc conflicts with `/.recursive/RECURSIVE.md`, follow `/.recursive
 - `../recursive-debugging/SKILL.md`
 - `../recursive-tdd/SKILL.md`
 - `../recursive-review-bundle/SKILL.md`
+- `../recursive-review/SKILL.md` — lossless finding ledger, repair loop, and controller-verified closure
 - `../recursive-router/SKILL.md`
 - `../recursive-subagent/SKILL.md`
 - `../recursive-training/SKILL.md` — extract durable experiential knowledge from completed runs
@@ -160,19 +163,19 @@ Before dispatching from an isolated worktree, make sure the routing policy and d
 - `recursive-benchmark` stays outside the default recursive-mode package surface.
 - Install it only when a user explicitly asks to benchmark recursive-mode, preferably via `find-skills` or by adding its dedicated benchmark add-on package or repo source.
 
-For audited phases, the installed workflow requires `draft -> audit -> repair -> re-audit -> pass -> lock`, with `Audit: PASS` required before Coverage/Approval may pass.
+For audited phases, the installed workflow requires `draft -> audit -> repair -> re-audit -> whole-ledger PASS -> Coverage -> Approval -> lock`. Every audited phase uses an immutable per-pass bundle and one canonical `recursive-review` ledger with exact `## Review Scope`, `## Findings`, and `## Verdict`.
 Treat `## Worktree Diff Audit` as phase-scoped: Phase 2 owns planning completeness plus expected product/worktree paths, Phase 3-4 own actual product/worktree drift, Phase 6 owns `/.recursive/DECISIONS.md`, Phase 7 owns `/.recursive/STATE.md`, and Phase 8 owns `/.recursive/memory/**`.
-New runs should use `Workflow version: recursive-mode-audit-v2`, where Phase 1 must include `## Source Requirement Inventory` and Phase 2 must include `## Requirement Mapping`, `## Plan Drift Check`, and plan-stage `## Requirement Completion Status`.
+The current contract requires the Phase 1 `## Source Requirement Inventory`, Phase 2 `## Requirement Mapping`, `## Plan Drift Check`, plan-stage `## Requirement Completion Status`, and lossless review ledgers for every audited phase.
 For Phase 3, declare `TDD Mode: strict|pragmatic`. Strict mode requires concrete RED and GREEN evidence paths. Pragmatic mode requires an explicit exception rationale plus compensating evidence.
 For Phase 5, declare `QA Execution Mode: human|agent-operated|hybrid`. Do not fake human sign-off for agent-operated QA, and do not omit sign-off for human or hybrid QA.
-For delegated review, prefer `.recursive/scripts/recursive-review-bundle.py` or `.recursive/scripts/recursive-review-bundle.ps1` so Phase 3.5 records a canonical `Review Bundle Path`.
+For delegated review, prefer `.recursive/scripts/recursive-review-bundle.py` or `.recursive/scripts/recursive-review-bundle.ps1` so every audited phase records canonical bundle and ledger pointers.
 If meaningful subagent work contributes to a phase, record it under `/.recursive/run/<run-id>/subagents/` and verify the action record against actual files, actual diffs, and actual recursive artifacts before accepting it. For review/audit delegation, prefer a stable reviewed artifact for `Current Artifact` rather than a mutable draft receipt.
 Audited phases must record `Subagent Capability Probe`, `Delegation Decision Basis`, `## Subagent Contribution Verification`, and `## Requirement Completion Status`.
 When subagents are available and the context bundle is complete, delegated audit/review is the default path. If the controller still uses `Audit Execution Mode: self-audit`, record a concrete `Delegation Override Reason`.
 Use the stronger requirement disposition fields in `## Requirement Completion Status`: `Changed Files`, `Implementation Evidence`, `Verification Evidence`, `Deferred By`, `Scope Decision`, `Blocking Evidence`, and `Addendum` as appropriate to the chosen status.
 Do not mark `implemented` or `verified` without concrete `Changed Files`. Do not mark `verified` without distinct verification evidence.
 Treat addenda as authoritative effective inputs. When relevant addenda exist, list them under `Inputs`, re-read them in `## Effective Inputs Re-read`, and reconcile them in `## Earlier Phase Reconciliation`.
-Review bundles should include relevant addenda automatically, and the written Phase 3.5 review should cite bundle-grounded upstream artifacts, addenda, and changed files or code refs in the review narrative.
+Review bundles should include relevant addenda automatically. Every audited phase uses `recursive-review`: its `## Review Scope` cites bundle-grounded upstream artifacts, addenda, changed files, code refs, and evidence; all technical findings live only as stable records in the canonical ledger. Self-audit uses the same append-only ledger and IDs. Any reviewed-surface change refreshes the bundle and advances the pass before re-audit.
 `00-worktree.md` is the source of truth for diff basis. Record baseline type/reference, comparison reference, normalized baseline/comparison, and normalized diff command; do not silently improvise a different basis later.
 Use Phase 8 to update skill memory under `/.recursive/memory/skills/` when the run teaches the repo something durable about skill availability, fit, delegated-review quality, or skill-discovery outcomes.
 Phase 8 should also capture run-local skill usage before promoting any lesson into durable memory.

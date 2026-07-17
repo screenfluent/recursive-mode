@@ -889,6 +889,7 @@ Ensure-File -Path $cursorRulesPath -Content ""
 Ensure-File -Path $claudePath -Content ""
 Ensure-File -Path $copilotInstructionsPath -Content ""
 Ensure-GitIgnoreLine -RepoRoot $resolvedRepoRoot -Line "/.recursive/config/recursive-router-discovered.json"
+Ensure-GitIgnoreLine -RepoRoot $resolvedRepoRoot -Line "/.recursive/local/reviews/"
 Ensure-RouterConfigScaffold -RepoRoot $resolvedRepoRoot
 
 Upsert-MarkedBlock `

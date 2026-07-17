@@ -107,6 +107,8 @@ Legacy compatibility aliases still resolve to these stage-aligned roles:
 
 `recursive-mode` and `recursive-subagent` still own phase sequencing, audit standards, review-bundle rules, and acceptance criteria. Do not restate or weaken those here.
 
+The router does not own the finding schema, finding IDs, dispositions, or controller acceptance. It transports the named protocol, immutable bundle, ledger pointers, and candidate claims; the controller verifies the returned rows against the repository.
+
 ## Required Behavior
 
 - Routing is an extension of `recursive-subagent`, not a replacement for it.
@@ -119,6 +121,7 @@ Legacy compatibility aliases still resolve to these stage-aligned roles:
 - Do **not** let a routed role choose its own phase, inputs, or acceptance standard.
 - Routed roles do not own final acceptance. The orchestrator remains responsible for the audit-repair loop and must keep repairing or rerouting until the phase gates actually pass.
 - Before dispatch, give the routed role a real context bundle: canonical review bundle or prompt bundle path, exact artifact paths, relevant upstream docs, required checks, and exact output shape.
+- For audited review, pass through `Review Protocol Path`, `Review Bundle Path`, `Review Ledger Path`, and the owning structured `## Claimed Findings` payload unchanged from the review/subagent contract.
 - Prefer brief dispatch prompts that point at canonical workflow artifacts such as `00-requirements.md`, `01-as-is.md`, `02-to-be-plan.md`, the active phase artifact, or a generated review bundle, instead of inventing a second router-specific workflow narrative.
 - Do **not** delegate using only vague file references such as "read the docs" when the routed model needs concrete context to succeed.
 - If a routed model has shown weak instruction-following, inline the specific requirement, artifact, or section excerpts needed for that assignment and reject any output that does not cite or follow them.

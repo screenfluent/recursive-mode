@@ -685,6 +685,7 @@ def main() -> None:
     ensure_file(claude_path, "")
     ensure_file(copilot_instructions_path, "")
     ensure_gitignore_line(repo_root, "/.recursive/config/recursive-router-discovered.json")
+    ensure_gitignore_line(repo_root, "/.recursive/local/reviews/")
     try:
         ensure_router_scaffold(repo_root)
     except RouterConfigError as exc:

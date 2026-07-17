@@ -389,7 +389,7 @@ class RecursiveRouterTests(unittest.TestCase):
             wrapper_path.chmod(0o755)
         return wrapper_path
 
-    def test_install_bootstrap_creates_router_policy_and_gitignores_local_discovery(self) -> None:
+    def test_install_bootstrap_creates_policy_and_gitignores_local_state(self) -> None:
         self.install_bootstrap()
 
         policy = self.load_json(self.policy_path())
@@ -404,6 +404,7 @@ class RecursiveRouterTests(unittest.TestCase):
         self.assertIsNone(policy["role_routes"]["analyst"]["model"])
         self.assertFalse(self.discovery_path().exists())
         self.assertIn("/.recursive/config/recursive-router-discovered.json", gitignore)
+        self.assertIn("/.recursive/local/reviews/", gitignore)
 
     def test_init_does_not_overwrite_existing_policy(self) -> None:
         self.install_bootstrap()

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Recursive Review"
+  short_description: "Lossless review findings with verified closure"
+  default_prompt: "Use $recursive-review to run a lossless review ledger through repair and controller-verified closure."
+policy:
+  allow_implicit_invocation: true

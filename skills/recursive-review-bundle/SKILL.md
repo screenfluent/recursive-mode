@@ -1,91 +1,71 @@
 ---
 name: recursive-review-bundle
-description: 'Use when recursive-mode work needs a canonical delegated-review or audit handoff. Generates reproducible review bundles for Phase 3.5 code review, test review, or other delegated checks using the repo review-bundle scripts.'
+description: 'Use when recursive-mode work needs a canonical delegated-review or audit handoff. Generates reproducible immutable per-pass review input bundles for every audited phase using the repo scripts.'
 ---
 
 # recursive-review-bundle
 
-Use this skill to prepare a canonical review bundle before delegating an audit or review in `recursive-mode`.
+Prepare the reproducible input snapshot for delegated review. The bundle is not a finding ledger and does not own repair or acceptance; `recursive-review` owns those behaviors.
 
-This skill does not replace `/.recursive/RECURSIVE.md`. It packages the context bundle that delegated reviewers need so the review is durable, reproducible, and acceptable to the workflow.
+Each immutable per-pass bundle binds one audited artifact snapshot to one ledger pass.
 
-## Canonical Scripts
-
-Use the repo scripts:
+## Use the canonical scripts
 
 - `./.recursive/scripts/recursive-review-bundle.py`
 - `./.recursive/scripts/recursive-review-bundle.ps1`
 
-Prefer the Python script when both toolchains are available. Use the PowerShell wrapper when the delegated path is already PowerShell-oriented.
+Prefer Python when both are available. Use the PowerShell adapter for a PowerShell-oriented path.
 
-## Minimum Inputs
+## Inputs
 
-Provide all of:
-
-- repo root
-- run id
-- phase name
-- reviewer role
-- artifact path being reviewed
-- exact upstream artifact paths
-- relevant audit questions
-- required output shape
-
-Add explicit evidence refs or addenda when they matter. The bundle generator will also auto-discover relevant addenda and skill-memory refs when applicable.
-
-## Typical Commands
+Provide repo root, run ID, phase, reviewer role, reviewed artifact, exact upstream artifacts, relevant questions, and a stable review ID. Add code, evidence, control-plane, routing, and prior-evidence refs that affect the review. The generator discovers relevant addenda by default.
 
 ```bash
-python ./.recursive/scripts/recursive-review-bundle.py \
+python3 ./.recursive/scripts/recursive-review-bundle.py \
   --repo-root . \
   --run-id "<run-id>" \
-  --phase "03.5 Code Review" \
-  --role code-reviewer \
-  --artifact-path "/.recursive/run/<run-id>/03.5-code-review.md" \
+  --phase "02 TO-BE" \
+  --role planner \
+  --review-id plan-review \
+  --pass 0001 \
+  --artifact-path "/.recursive/run/<run-id>/02-to-be-plan.md" \
   --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" \
-  --upstream-artifact "/.recursive/run/<run-id>/02-to-be-plan.md" \
-  --routing-config-path ".recursive/config/recursive-router.json" \
-  --routing-discovery-path ".recursive/config/recursive-router-discovered.json" \
-  --routed-cli "codex" \
-  --routed-model "gpt-5.4" \
-  --audit-question "Which R# remain incomplete?" \
-  --required-output "Findings ordered by severity"
+  --upstream-artifact "/.recursive/run/<run-id>/01-as-is.md" \
+  --audit-question "Which accepted requirements are not planned?"
 ```
 
 ```powershell
 pwsh -NoProfile -File ./.recursive/scripts/recursive-review-bundle.ps1 `
   -RepoRoot . `
   -RunId "<run-id>" `
-  -Phase "03.5 Code Review" `
-  -Role code-reviewer `
-  -ArtifactPath "/.recursive/run/<run-id>/03.5-code-review.md" `
-  -UpstreamArtifact "/.recursive/run/<run-id>/00-requirements.md","/.recursive/run/<run-id>/02-to-be-plan.md" `
-  -RoutingConfigPath ".recursive/config/recursive-router.json" `
-  -RoutingDiscoveryPath ".recursive/config/recursive-router-discovered.json" `
-  -RoutedCli "codex" `
-  -RoutedModel "gpt-5.4" `
-  -AuditQuestion "Which R# remain incomplete?" `
-  -RequiredOutput "Findings ordered by severity"
+  -Phase "02 TO-BE" `
+  -Role planner `
+  -ReviewId plan-review `
+  -ReviewPass 0001 `
+  -ArtifactPath "/.recursive/run/<run-id>/02-to-be-plan.md" `
+  -UpstreamArtifact "/.recursive/run/<run-id>/00-requirements.md","/.recursive/run/<run-id>/01-as-is.md" `
+  -AuditQuestion "Which accepted requirements are not planned?"
 ```
 
-## Acceptance Rules
+## Required review output
 
-- Record `Review Bundle Path` in the delegated phase artifact.
-- Refresh the bundle after material repairs or scope changes.
-- Require the reviewer to cite the bundle path, upstream artifacts reread, relevant addenda, changed files or code refs reviewed, and a final verdict.
-- Do not treat a bare bundle file as proof of review quality; the written review still has to use the bundle contents.
+For every audited phase, the generator fixes the output contract; callers cannot replace it with prose. Review output uses exactly:
 
-## Routing Awareness
+```markdown
+## Review Scope
 
-If the prepared bundle will be handed to a routed reviewer, re-read:
+## Findings
 
-- `/.recursive/config/recursive-router.json`
-- `/.recursive/config/recursive-router-discovered.json`
+## Verdict
+```
 
-immediately before the delegated call, and include the relevant routing-path citations in the review or action-record metadata.
+Every technical issue is a stable `F-*` record under `## Findings`. New findings start open. A reviewer or repair agent cannot assign terminal dispositions. Load `recursive-review` and its finding protocol before consuming the bundle.
 
-## References
+## Acceptance
 
-- `/.recursive/RECURSIVE.md`
-- `/docs/templates/commands/recursive-review-bundle.md`
-- `../recursive-subagent/SKILL.md`
+- Record both `Review Bundle Path` and `Review Ledger Path` in every audited artifact.
+- Regenerate after any change to the reviewed diff, artifact, or evidence basis.
+- Require the reviewer to cite the bundle-grounded upstream artifacts, addenda, diff basis, changed files, and evidence.
+- Treat the bundle as input evidence, never proof of review quality or repair acceptance.
+
+When routing applies, reread the repo routing policy and discovery inventory immediately before dispatch and cite the resolved paths/model in the bundle or action record.
