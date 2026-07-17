@@ -150,6 +150,7 @@ Supported memory doc types:
 - `incident`
 - `episode`
 - `training`
+- `glossary`
 
 Skill memory is a first-class part of the memory plane. Use `/.recursive/memory/skills/SKILLS.md` as the skill-memory router and shard durable skill knowledge under:
 
@@ -175,6 +176,13 @@ Every durable memory doc except `MEMORY.md` must include metadata near the top w
 - `Last-Validated`
 - `Tags`
 
+**Exception — `Type: glossary`** (canonical path `/.recursive/memory/GLOSSARY.md`):
+
+- Required: `Type`, `Authority: human`, `Status`, `Last-Approved`
+- Optional: `Source-Runs`, `Tags`
+- **Must not** require `Owns-Paths`, `Watch-Paths`, or `Validated-At-Commit`
+- Adding, changing, or removing a definition requires explicit human approval. The `recursive-domain-modeling` skill owns this workflow.
+
 Optional metadata fields:
 
 - `Parent`
@@ -195,10 +203,12 @@ Freshness rules:
 - `domain` docs use `Owns-Paths` for primary ownership of code surfaces.
 - `pattern` and `incident` docs may declare `Watch-Paths` without being the primary owner.
 - `training` docs do not own product paths; they should use `Watch-Paths` or equivalent applicability guidance to record where the learning tends to apply.
+- `glossary` docs are exempt from path-based freshness checks. Code-path changes must not automatically downgrade them to `SUSPECT`. Phase 8 may detect **semantic term drift** between code or run language and the glossary, but it may only propose a correction through `recursive-domain-modeling` and human approval. It must never edit `GLOSSARY.md` autonomously.
 - If a final validated code diff touches a path matched by `Owns-Paths` or `Watch-Paths`, that memory doc must be reviewed in Phase 8.
 - Affected `CURRENT` docs must be downgraded to `SUSPECT` until semantic review is complete.
 - Only after semantic review against final code, `STATE.md`, and `DECISIONS.md` may a `SUSPECT` doc return to `CURRENT`.
 - If changed code paths have no matching owning `domain` doc, Phase 8 must either create a new domain memory doc or record an explicit uncovered-path follow-up.
+- When an approved glossary meaning change affects a run artifact, re-audit the artifact while it is `DRAFT`; if it is already `LOCKED`, leave it locked and record an addendum.
 
 Sharding rules:
 
