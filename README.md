@@ -15,6 +15,17 @@ It gives an agent a file-backed workflow for requirements, planning, implementat
 This repo currently ships these default installable skills:
 
 - `recursive-mode`
+- `recursive-architecture-survey`
+- `recursive-codebase-design`
+- `recursive-delivery-slicing`
+- `recursive-domain-modeling`
+- `recursive-grilling`
+- `recursive-handoff`
+- `recursive-merge-conflicts`
+- `recursive-prototype`
+- `recursive-research`
+- `recursive-residue-sweep`
+- `recursive-review`
 - `recursive-spec`
 - `recursive-worktree`
 - `recursive-debugging`
@@ -23,6 +34,7 @@ This repo currently ships these default installable skills:
 - `recursive-router`
 - `recursive-subagent`
 - `recursive-training`
+- `recursive-wayfinder`
 
 Optional add-on:
 
@@ -32,14 +44,26 @@ Optional add-on:
 
 | Skill | Purpose |
 | --- | --- |
-| `recursive-spec` | Co-authors repo-aware requirements for a new run from plan/spec prompts, keeps the draft outside the repo until approval, then creates the run and writes `00-requirements.md`. |
+| `recursive-architecture-survey` | On explicit request, surveys architectural friction and evidence-supported deepening opportunities that improve testability and AI-navigability, then stops before backlog creation or design. |
+| `recursive-codebase-design` | Designs deep modules, seams, interfaces, and material program flow inside Phase 2. |
+| `recursive-delivery-slicing` | Splits an approved multi-run specification into a dependency-aware delivery DAG and maintains its frontier across runs. |
+| `recursive-domain-modeling` | Sharpens ubiquitous language and maintains the human-authoritative glossary through explicit approval. |
+| `recursive-grilling` | Grills and stress-tests a draft relentlessly by resolving its decision tree one human choice at a time. |
+| `recursive-handoff` | On explicit request, creates a temporary, redacted cross-session handoff without becoming a second source of truth for an active run. |
+| `recursive-merge-conflicts` | Resolves an active merge or rebase conflict from recoverable source intent without inventing a third behavior, and carries the operation to verified completion. |
+| `recursive-prototype` | Builds throwaway logic or UI prototypes that answer an explicit design question; active-run prototypes close before Phase 2 lock, while standalone prototypes have no Phase 2 dependency. |
+| `recursive-research` | Investigates one bounded question against high-trust primary sources and captures verified findings in one cited Markdown report. |
+| `recursive-residue-sweep` | Finds or removes prose and names that depend on session history or a previous version. |
+| `recursive-review` | Runs the lossless technical-review ledger through repair and controller-verified closure. |
+| `recursive-spec` | Co-authors approval-gated, repo-aware requirements, materializes approved delivery slices into new runs, and amends active delivery specifications between slice runs. |
 | `recursive-worktree` | Sets up an isolated worktree before implementation starts. |
 | `recursive-debugging` | Adds structured root-cause analysis before fixing bugs or failing tests. |
 | `recursive-tdd` | Enforces RED-GREEN-REFACTOR discipline for implementation work. |
-| `recursive-review-bundle` | Builds canonical review bundles for delegated Phase 3.5 review. |
-| `recursive-router` | Routes delegated subagent roles through configured external transports, CLIs, and models while preserving explicit fallback and controller verification. The current CLI/IDE/agent remains the orchestrator; routed CLIs only handle bounded delegated work with a real context bundle. Opt-in only: use it when the user explicitly asks to route or set up model/provider bindings. |
+| `recursive-review-bundle` | Builds canonical immutable review bundles for every audited phase. |
+| `recursive-router` | Routes delegated subagent roles through configured external transports, CLIs, and models while preserving explicit fallback and controller verification. The current CLI/IDE/agent remains the orchestrator; routed CLIs only handle bounded delegated work with a real context bundle. Setup, discovery, and reconfiguration are opt-in; an active configured route is reused without asking again. |
 | `recursive-subagent` | Helps delegate bounded implementation, audit, or review work and verify the results. |
 | `recursive-training` | Extracts durable experiential knowledge from completed recursive-mode runs into `/.recursive/memory/`, keeps `MEMORY.md` as the discovery index, and provides read-only startup guidance plus loader-based retrieval for new runs. |
+| `recursive-wayfinder` | On explicit human request, maps a foggy multi-session effort until a clear, human-approved slice can move into `recursive-spec`. |
 
 Optional add-on:
 
@@ -53,6 +77,9 @@ The workflow package includes functionality for:
 
 - turning a repo task into a staged, file-backed implementation run
 - co-authoring repo-aware requirements/specs before creating a new run
+- mapping foggy multi-session work before requirements authoring and slicing approved multi-run delivery into a dependency-aware frontier
+- sharpening domain language in a human-authoritative glossary and keeping requirements, design, plans, and tests aligned with approved definitions
+- designing codebase seams and deep modules, with bounded research and throwaway prototypes available as evidence before Phase 2 lock
 - benchmarking recursive-mode against a non-recursive baseline in paired disposable repos when the optional benchmark add-on is installed
 - collecting screenshot artifacts taken during benchmark validation and embedding them in the report when present
 - capturing requirements, analysis, plans, implementation evidence, and validation in durable artifacts
@@ -60,9 +87,11 @@ The workflow package includes functionality for:
 - preserving arbitrary `00-requirements.md` content through Phase 1 `Source Requirement Inventory` and Phase 2 lossless requirement mapping
 - isolating work in a dedicated git worktree before implementation begins
 - running strict or pragmatic TDD with recorded RED/GREEN evidence
+- resolving active merge or rebase conflicts from source intent without silently inventing behavior
 - recording QA in explicit human, agent-operated, or hybrid modes
-- packaging delegated reviews into canonical review bundles
-- probing and resolving external transport/model routes for delegated subagent roles from `/.recursive/config/recursive-router.json` when the user explicitly asks to set up or use routing
+- packaging every audited phase into immutable review bundles and recording all technical findings in one lossless ledger
+- producing temporary cross-session handoffs without duplicating canonical run artifacts
+- probing external transport/model routes only for explicitly requested setup, discovery, or reconfiguration, and resolving an active configured route from `/.recursive/config/recursive-router.json` without asking again
 - dispatching real prompt bundles through the resolved routed CLI/model pair with a repo-supported invoke path instead of ad hoc helpers
 - recording machine-specific router launcher details in policy via `cli_overrides` or `custom_clis` when the working CLI entrypoint differs across operating systems, shells, or devices
 - recording and checking subagent contributions before they are accepted
@@ -99,7 +128,7 @@ The main non-optional guardrails are:
 - audited phases must pass through `draft -> audit -> repair -> re-audit -> pass -> lock`
 - locked history is not rewritten; later corrections are handled through addenda and downstream reconciliation
 - in-scope requirements need explicit dispositions and supporting implementation or verification evidence
-- Phase 2 in the current workflow profile must preserve source obligations losslessly with `Source Requirement Inventory`, `Requirement Mapping`, and `Plan Drift Check`
+- Phase 2 must preserve source obligations losslessly with `Source Requirement Inventory`, `Requirement Mapping`, and `Plan Drift Check`
 - delegated work is not trusted on its own; the main agent must verify it against real files, diffs, and artifacts
 - TDD, QA, review, and closeout all require explicit recorded modes, evidence, and phase outputs
 
@@ -321,10 +350,10 @@ references/
 
 ## Repository Validation
 
-When changing this repository itself, use the explicit module command rather than plain `python -m unittest`:
+When changing this repository itself, run the complete discovered suite:
 
 ```bash
-python -m unittest scripts.test_install_recursive_mode scripts.test_lint_recursive_run scripts.test_recursive_phase_rules scripts.test_recursive_review_bundle scripts.test_recursive_router scripts.test_recursive_subagent_action scripts.test_recursive_training scripts.test_run_recursive_benchmark
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
 For disposable end-to-end coverage, run:

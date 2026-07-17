@@ -21,6 +21,17 @@ If you just need a lightweight routing/index doc for what to read under `/.recur
 Installable entrypoints:
 
 - `/skills/recursive-mode/SKILL.md`
+- `/skills/recursive-architecture-survey/SKILL.md`
+- `/skills/recursive-codebase-design/SKILL.md`
+- `/skills/recursive-delivery-slicing/SKILL.md`
+- `/skills/recursive-domain-modeling/SKILL.md`
+- `/skills/recursive-grilling/SKILL.md`
+- `/skills/recursive-handoff/SKILL.md`
+- `/skills/recursive-merge-conflicts/SKILL.md`
+- `/skills/recursive-prototype/SKILL.md`
+- `/skills/recursive-research/SKILL.md`
+- `/skills/recursive-residue-sweep/SKILL.md`
+- `/skills/recursive-review/SKILL.md`
 - `/skills/recursive-spec/SKILL.md`
 - `/skills/recursive-worktree/SKILL.md`
 - `/skills/recursive-debugging/SKILL.md`
@@ -29,6 +40,7 @@ Installable entrypoints:
 - `/skills/recursive-router/SKILL.md`
 - `/skills/recursive-subagent/SKILL.md`
 - `/skills/recursive-training/SKILL.md`
+- `/skills/recursive-wayfinder/SKILL.md`
 
 Optional add-on source doc:
 
@@ -119,7 +131,7 @@ pwsh -NoProfile -File "<SKILL_DIR>/scripts/lint-recursive-run.ps1" -RepoRoot . -
 Generate a delegated review bundle:
 
 ```bash
-python "<SKILL_DIR>/scripts/recursive-review-bundle.py" --repo-root . --run-id "<run-id>" --phase "03.5 Code Review" --role code-reviewer --artifact-path "/.recursive/run/<run-id>/03.5-code-review.md" --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" --upstream-artifact "/.recursive/run/<run-id>/02-to-be-plan.md" --audit-question "Which R# remain incomplete?" --required-output "Findings ordered by severity"
+python "<SKILL_DIR>/scripts/recursive-review-bundle.py" --repo-root . --run-id "<run-id>" --phase "02 TO-BE" --role planner --review-id plan-review --pass 0001 --artifact-path "/.recursive/run/<run-id>/02-to-be-plan.md" --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" --upstream-artifact "/.recursive/run/<run-id>/01-as-is.md" --audit-question "Which accepted requirements are not planned?"
 ```
 
 Scaffold a late-phase closeout artifact:
@@ -150,7 +162,7 @@ npx skills add "<repo-root>" --skill '*' --full-depth --yes
 python ".agents/skills/recursive-mode/scripts/install-recursive-mode.py" --repo-root .
 ```
 
-That path should install the current recursive-mode package, include `recursive-training`, exclude `recursive-benchmark`, and let the installed bootstrap create the training-aware scaffold (`/.recursive/memory/training/`, `/.recursive/scripts/recursive-training-*`, and the stable memory pointer files).
+That path should install the complete recursive-mode package surface, including `recursive-training` and excluding `recursive-benchmark`, and let the installed root skill create the complete repo-local scaffold, including `/.recursive/memory/training/`, `/.recursive/scripts/recursive-training-*`, and the stable memory pointer files.
 
 Run the paired benchmark harness:
 
@@ -165,10 +177,10 @@ pwsh -NoProfile -File "<REPO_ROOT>/scripts/run-recursive-benchmark.ps1" -Runner 
 
 ## Maintainer Smoke Harness
 
-Run the explicit module regression command first; plain `python -m unittest` does not discover this repo's tests:
+Run explicit discovery first; plain `python -m unittest` does not discover this repo's tests:
 
 ```bash
-python -m unittest scripts.test_install_recursive_mode scripts.test_lint_recursive_run scripts.test_recursive_phase_rules scripts.test_recursive_review_bundle scripts.test_recursive_router scripts.test_recursive_subagent_action scripts.test_recursive_training scripts.test_run_recursive_benchmark
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
 Run disposable regression coverage when changing this repo itself:
@@ -192,8 +204,8 @@ Notes:
 
 ## Delegation And Review
 
-- prefer `recursive-review-bundle` for delegated Phase 3.5 review
-- record `Review Bundle Path`
+- use `recursive-review-bundle` for delegated review of every audited phase
+- record both `Review Bundle Path` and `Review Ledger Path`, then keep the immutable bundle, canonical ledger, phase artifact and pass number aligned
 - use `recursive-subagent-action` for durable delegated work records
 - verify delegated claims against actual files, diffs, bundles, and recursive artifacts before acceptance
 
