@@ -88,7 +88,7 @@ DECISIONS_DIFF_PHASE_FILES = {"06-decisions-update.md"}
 STATE_DIFF_PHASE_FILES = {"07-state-update.md"}
 MEMORY_DIFF_PHASE_FILES = {"08-memory-impact.md"}
 
-MEMORY_ALLOWED_TYPES = {"index", "domain", "pattern", "incident", "episode"}
+MEMORY_ALLOWED_TYPES = {"index", "domain", "pattern", "incident", "episode", "training", "glossary"}
 MEMORY_ALLOWED_STATUSES = {"CURRENT", "SUSPECT", "STALE", "DEPRECATED", "DRAFT"}
 MEMORY_REQUIRED_FIELDS = [
     "Type",
@@ -101,6 +101,8 @@ MEMORY_REQUIRED_FIELDS = [
     "Last-Validated",
     "Tags",
 ]
+GLOSSARY_REQUIRED_FIELDS = ["Type", "Authority", "Status", "Last-Approved"]
+GLOSSARY_FORBIDDEN_FIELDS = ["Owns-Paths", "Watch-Paths", "Validated-At-Commit"]
 TDD_MODES = {"strict", "pragmatic"}
 QA_EXECUTION_MODES = {"human", "agent-operated", "hybrid"}
 TRANSIENT_RUNTIME_DIR_MARKERS = {
@@ -2738,21 +2740,45 @@ def lint_artifact_file(
     return fail_count, warn_count
 
 
-def lint_memory_doc(file_path: Path) -> tuple[int, int]:
+def lint_memory_doc(file_path: Path, memory_root: Path) -> tuple[int, int]:
     content = file_path.read_text(encoding="utf-8")
     fail_count = 0
     warn_count = 0
 
-    missing_fields = [field for field in MEMORY_REQUIRED_FIELDS if not has_header_field(content, field)]
+    memory_type = (get_md_field_value(content, "Type") or "").lower()
+    is_glossary_path = file_path == memory_root / "GLOSSARY.md"
+    if memory_type == "glossary" and not is_glossary_path:
+        fail_count += 1
+        write_issue("FAIL", file_path, "Type 'glossary' is allowed only at .recursive/memory/GLOSSARY.md")
+    if is_glossary_path and memory_type != "glossary":
+        fail_count += 1
+        write_issue("FAIL", file_path, "The canonical .recursive/memory/GLOSSARY.md must declare Type 'glossary'")
+
+    required_fields = GLOSSARY_REQUIRED_FIELDS if is_glossary_path else MEMORY_REQUIRED_FIELDS
+    missing_fields = [field for field in required_fields if not has_header_field(content, field)]
     if missing_fields:
         fail_count += 1
         write_issue("FAIL", file_path, f"Missing required memory metadata field(s): {', '.join(missing_fields)}")
         return fail_count, warn_count
 
-    memory_type = (get_md_field_value(content, "Type") or "").lower()
     if memory_type not in MEMORY_ALLOWED_TYPES:
         fail_count += 1
         write_issue("FAIL", file_path, f"Invalid memory Type '{memory_type}' (expected one of: {', '.join(sorted(MEMORY_ALLOWED_TYPES))})")
+
+    if is_glossary_path:
+        authority = (get_md_field_value(content, "Authority") or "").lower()
+        if authority != "human":
+            fail_count += 1
+            write_issue("FAIL", file_path, "Glossary Authority must be 'human'")
+
+        if not get_md_field_value(content, "Last-Approved"):
+            fail_count += 1
+            write_issue("FAIL", file_path, "Glossary Last-Approved must not be empty")
+
+        forbidden_fields = [field for field in GLOSSARY_FORBIDDEN_FIELDS if has_header_field(content, field)]
+        if forbidden_fields:
+            fail_count += 1
+            write_issue("FAIL", file_path, f"Glossary must not declare path-freshness field(s): {', '.join(forbidden_fields)}")
 
     memory_status = (get_md_field_value(content, "Status") or "").upper()
     if memory_status not in MEMORY_ALLOWED_STATUSES:
@@ -2805,7 +2831,7 @@ def lint_memory_plane(repo_root: Path) -> tuple[int, int]:
     for doc in sorted(memory_root.rglob("*.md")):
         if doc.name in SKILL_MEMORY_ROUTER_NAMES:
             continue
-        doc_fail, doc_warn = lint_memory_doc(doc)
+        doc_fail, doc_warn = lint_memory_doc(doc, memory_root)
         fail_count += doc_fail
         warn_count += doc_warn
 

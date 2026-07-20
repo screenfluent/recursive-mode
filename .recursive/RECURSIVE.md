@@ -164,7 +164,7 @@ Training memory is a separate first-class part of the memory plane. Use `/.recur
 Phase 8 must update skill memory when a run teaches the repository something durable about skill availability, skill fit, delegated review quality, or repeated workflow friction.
 Phase 8 must also record a run-local skill-usage capture before deciding what, if anything, is worth promoting into durable skill memory.
 
-Every durable memory doc except `MEMORY.md` must include metadata near the top with at least:
+Every durable memory shard except the router/index files `MEMORY.md` and `skills/SKILLS.md` must include metadata near the top with at least:
 
 - `Type`
 - `Status`

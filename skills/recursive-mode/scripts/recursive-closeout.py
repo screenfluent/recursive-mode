@@ -419,6 +419,10 @@ def build_scaffold(
 ) -> str:
     file_name = PHASE_CONFIG[phase_key]["file_name"]  # type: ignore[index]
     headings = lint.get_artifact_required_sections(file_name)
+    terminal_headings = ("Traceability", "Coverage Gate", "Approval Gate")
+    headings = [heading for heading in headings if heading not in terminal_headings] + [
+        heading for heading in terminal_headings if heading in headings
+    ]
     inputs = collect_phase_inputs(lint, repo_root, run_dir, file_name, phase_key, preview_log_path)
     outputs = collect_phase_outputs(run_dir, phase_key, file_name)
     requirement_ids = parse_requirement_ids(lint, run_dir)

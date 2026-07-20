@@ -115,6 +115,8 @@ class RecursiveReviewSingleContractTest(unittest.TestCase):
         for phase in ("04", "06", "07", "08"):
             with self.subTest(phase=phase):
                 scaffold = closeout.build_scaffold(lint, self.root, self.run, phase, None, "")
+                headings = [line.removeprefix("## ") for line in scaffold.splitlines() if line.startswith("## ")]
+                self.assertEqual(headings[-3:], ["Traceability", "Coverage Gate", "Approval Gate"])
                 metadata, issues = review.parse_review_metadata(scaffold)
                 self.assertFalse(issues, issues)
                 self.assertEqual(list(metadata), review.REVIEW_METADATA_FIELDS)
@@ -125,6 +127,8 @@ class RecursiveReviewSingleContractTest(unittest.TestCase):
                 self.assertTrue((self.run / f"evidence/review-bundles/{phase_key}").is_dir())
 
         phase5 = closeout.build_scaffold(lint, self.root, self.run, "05", None, "")
+        phase5_headings = [line.removeprefix("## ") for line in phase5.splitlines() if line.startswith("## ")]
+        self.assertEqual(phase5_headings[-3:], ["Traceability", "Coverage Gate", "Approval Gate"])
         self.assertNotIn("## Review Metadata", phase5)
         closeout.ensure_review_roots(self.run, "05-manual-qa.md")
         self.assertFalse((self.run / "evidence/reviews/phase-5").exists())

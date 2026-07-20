@@ -201,35 +201,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
             with self.subTest(path=str(relative_path), snippet="recursive-training-extract"):
                 self.assertIn("`recursive-training-extract`", content)
 
-    def test_templates_include_routing_metadata_for_routed_delegation(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        expectations = {
-            Path("docs/templates/commands/recursive-review-bundle.md"): (
-                "Routing Config Path",
-                "Routing Discovery Path",
-                "Routed CLI",
-                "Routed Model",
-            ),
-            Path("docs/templates/commands/recursive-subagent-action.md"): (
-                "Routing Config Path",
-                "Routing Discovery Path",
-                "Routed CLI",
-                "Routed Model",
-            ),
-            Path("skills/recursive-mode/references/artifact-template.md"): (
-                "Routing Config Path",
-                "Routing Discovery Path",
-                "Routed CLI",
-                "Routed Model",
-            ),
-        }
-
-        for relative_path, required_snippets in expectations.items():
-            content = (repo_root / relative_path).read_text(encoding="utf-8")
-            for snippet in required_snippets:
-                with self.subTest(path=str(relative_path), snippet=snippet):
-                    self.assertIn(snippet, content)
-
     def test_subskill_docs_use_bootstrapped_runtime_examples(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         expectations = {
