@@ -693,46 +693,67 @@ class InstallRecursiveModeTests(unittest.TestCase):
         if bash_path is None:
             self.skipTest("bash is required for shell installer fallback coverage")
 
-        powershell = shutil.which("pwsh") or shutil.which("powershell")
-        if powershell is None:
-            self.skipTest("PowerShell is required for shell installer fallback coverage")
-
         with tempfile.TemporaryDirectory(prefix="install-recursive-mode-shell-fallback-") as temp_dir:
             repo_root = Path(temp_dir) / "repo"
             repo_root.mkdir(parents=True, exist_ok=True)
             driver_path = Path(temp_dir) / "run-shell-installer.sh"
+            shim_dir = Path(temp_dir) / "bin"
+            shim_dir.mkdir(parents=True, exist_ok=True)
+            powershell_args_path = Path(temp_dir) / "powershell-args.txt"
+
+            def to_git_bash_path(path: Path) -> str:
+                raw = path.resolve().as_posix()
+                if os.name == "nt" and len(raw) >= 2 and raw[1] == ":":
+                    return f"/{raw[0].lower()}/{raw[3:]}"
+                return raw
+
+            failing_python_shim = "#!/usr/bin/env bash\nexit 1\n"
+            for executable_name in ("python3", "python", "py"):
+                executable_path = shim_dir / executable_name
+                executable_path.write_text(failing_python_shim, encoding="utf-8", newline="\n")
+                executable_path.chmod(0o755)
+
+            powershell_shim = shim_dir / "pwsh"
+            powershell_shim.write_text(
+                """#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$@" > "$RECURSIVE_TEST_POWERSHELL_ARGS"
+test "$#" -eq 6
+test "$1" = "-NoProfile"
+test "$2" = "-File"
+test "$3" = "$RECURSIVE_TEST_EXPECTED_PS1"
+test "$4" = "-SkipRecursiveUpdate"
+test "$5" = "-RepoRoot"
+test "$6" = "$RECURSIVE_TEST_EXPECTED_REPO"
+mkdir -p "$RECURSIVE_TEST_EXPECTED_REPO/.recursive/scripts"
+: > "$RECURSIVE_TEST_EXPECTED_REPO/.recursive/scripts/recursive-init.py"
+printf '%s\n' 'Skipped RECURSIVE.md update by configuration.'
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            powershell_shim.chmod(0o755)
+
+            script_target = to_git_bash_path(MODULE_PATH.with_suffix(".sh"))
+            repo_target = to_git_bash_path(repo_root)
+            powershell_target = to_git_bash_path(MODULE_PATH.with_suffix(".ps1"))
+            shim_target = to_git_bash_path(shim_dir)
+            args_target = to_git_bash_path(powershell_args_path)
 
             if os.name == "nt":
-                script_target = MODULE_PATH.with_suffix(".sh").resolve()
-                repo_target = repo_root.resolve()
-
-                def to_git_bash_path(path: Path) -> str:
-                    raw = path.as_posix()
-                    if len(raw) >= 2 and raw[1] == ":":
-                        return f"/{raw[0].lower()}/{raw[3:]}"
-                    return raw
-
-                path_entries = []
-                for executable in (shutil.which("pwsh"), shutil.which("powershell")):
-                    if not executable:
-                        continue
-                    parent = Path(executable).resolve().parent
-                    entry = to_git_bash_path(parent)
-                    if entry not in path_entries:
-                        path_entries.append(entry)
-                path_entries.extend(["/usr/bin", "/bin"])
-                driver_lines = [
-                    "#!/usr/bin/env bash",
-                    "set -e",
-                    f"export PATH='{':'.join(path_entries)}'",
-                    f"'{to_git_bash_path(script_target)}' --skip-recursive-update --repo-root '{to_git_bash_path(repo_target)}'",
-                ]
+                path_value = f"{shim_target}:/usr/bin:/bin"
             else:
-                driver_lines = [
-                    "#!/usr/bin/env bash",
-                    "set -e",
-                    f"'{MODULE_PATH.with_suffix('.sh')}' --skip-recursive-update --repo-root '{repo_root}'",
-                ]
+                path_value = os.pathsep.join((str(shim_dir), "/usr/bin", "/bin"))
+
+            driver_lines = [
+                "#!/usr/bin/env bash",
+                "set -e",
+                f"export PATH='{path_value}'",
+                f"export RECURSIVE_TEST_POWERSHELL_ARGS='{args_target}'",
+                f"export RECURSIVE_TEST_EXPECTED_PS1='{powershell_target}'",
+                f"export RECURSIVE_TEST_EXPECTED_REPO='{repo_target}'",
+                f"bash '{script_target}' --skip-recursive-update --repo-root '{repo_target}'",
+            ]
 
             driver_path.write_text("\n".join(driver_lines) + "\n", encoding="utf-8", newline="\n")
             completed = subprocess.run(
@@ -749,6 +770,17 @@ class InstallRecursiveModeTests(unittest.TestCase):
             )
             self.assertIn("Skipped RECURSIVE.md update by configuration.", completed.stdout)
             self.assertTrue((repo_root / ".recursive" / "scripts" / "recursive-init.py").exists())
+            self.assertEqual(
+                [
+                    "-NoProfile",
+                    "-File",
+                    powershell_target,
+                    "-SkipRecursiveUpdate",
+                    "-RepoRoot",
+                    repo_target,
+                ],
+                powershell_args_path.read_text(encoding="utf-8").splitlines(),
+            )
 
     def test_hygiene_checker_allows_local_skills_lock_temp_sources(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install-recursive-mode-hygiene-") as temp_dir:
