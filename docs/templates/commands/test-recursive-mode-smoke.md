@@ -31,7 +31,7 @@ pwsh -NoProfile -File "<REPO_ROOT>/scripts/test-recursive-mode-smoke.ps1" -Scena
 - Generates a canonical review bundle
 - Locks artifacts through Phase 8 using the supported lock command
 - Runs `lint`, `status`, and `verify-locks`
-- In `full` mode, runs targeted negative regressions for strict TDD, review bundle validity, context-free reviews, effective-input addenda handling, and QA sign-off requirements
+- In `full` mode, runs the negative and resilience cases specified in `references/fixtures/tiny-tasks-smoke-recipe.md`
 - In `subagent` mode, proves the dedicated delegated-review path end to end by keeping `03.5-code-review.md` bundle-backed and `Audit Execution Mode: subagent` through lock and final closeout
 - Proves diff audit ignores transient runtime noise such as `__pycache__/` and common test caches
 
