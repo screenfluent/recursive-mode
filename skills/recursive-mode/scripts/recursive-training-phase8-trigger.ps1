@@ -4,9 +4,8 @@
     Post-Phase 8 training trigger for recursive-mode.
 
 .DESCRIPTION
-    Called by the harness immediately after Phase 8 (08-memory-impact.md) is locked.
-    Checks whether training should run, constructs the appropriate command, and
-    executes it.
+    Thin wrapper around recursive-training-phase8-trigger.py.
+    Extraction transport is owned by recursive-training-extract.py, not this wrapper.
 
 .PARAMETER RepoRoot
     Path to the git repository root.
@@ -14,17 +13,12 @@
 .PARAMETER RunId
     The run that just completed Phase 8.
 
-.PARAMETER LlmProvider
-    LLM provider for extraction (default: kimi).
-
 .PARAMETER Auto
     Skip user confirmation and run training immediately.
 
-.PARAMETER WinnerOnlyThreshold
-    Minimum winners for winner-only mode (default: 2).
-
-.PARAMETER Quiet
-    Suppress non-error output.
+.PARAMETER GrpoArgs
+    Extra arguments passed through to recursive-training-grpo.py
+    (for example: '--winner-only-threshold 3').
 
 .EXAMPLE
     .\recursive-training-phase8-trigger.ps1 -RepoRoot . -RunId phase25 -Auto
@@ -36,19 +30,26 @@ param(
     [Parameter(Mandatory)]
     [string]$RunId,
 
-    [string]$LlmProvider = "kimi",
     [switch]$Auto,
-    [int]$WinnerOnlyThreshold = 2,
-    [switch]$Quiet
+
+    [string]$GrpoArgs = ""
 )
+
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    $python = Get-Command python3 -ErrorAction SilentlyContinue
+}
+if (-not $python) {
+    Write-Error "Python is required but not found."
+    exit 1
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pyScript = Join-Path $scriptDir "recursive-training-phase8-trigger.py"
 
-$argsList = @("--repo-root", $RepoRoot, "--run-id", $RunId, "--llm-provider", $LlmProvider)
-
+$argsList = @("--repo-root", $RepoRoot, "--run-id", $RunId)
 if ($Auto) { $argsList += "--auto" }
-if ($WinnerOnlyThreshold -ne 2) { $argsList += @("--winner-only-threshold", $WinnerOnlyThreshold) }
-if ($Quiet) { $argsList += "--quiet" }
+if ($GrpoArgs) { $argsList += @("--grpo-args", $GrpoArgs) }
 
-& python $pyScript @argsList
+& $python.Source $pyScript @argsList
+exit $LASTEXITCODE

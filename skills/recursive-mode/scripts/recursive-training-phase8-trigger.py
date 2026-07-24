@@ -19,9 +19,10 @@ Arguments:
     --grpo-args: Extra arguments passed through to recursive-training-grpo.py
 
 Exit codes:
-    0: OK (training ran, or skipped because < 2 runs)
+    0: OK (training wrote memory items)
     1: Error (missing scripts, bridge failure, etc.)
-    2: User declined (or --auto not set and user not prompted)
+    2: User declined (or --auto not set and user not prompted) / extractor unavailable
+    3: Training ran but wrote zero items (insufficient groups / empty extraction)
 """
 
 import argparse
@@ -74,7 +75,7 @@ def main() -> int:
     if completed < 2:
         print(f"Only {completed} completed run(s). Need 2+ for training.")
         print("Training skipped. Complete more runs and try again.")
-        return 0
+        return 3
 
     # --- Prompt or auto-run ---
     if not args.auto:
@@ -93,24 +94,43 @@ def main() -> int:
     # --- Run training ---
     print(f"Auto-triggering training for {args.run_id} ({completed} runs)...")
 
-    cmd = [
-        "python", str(grpo_script),
-        "--repo-root", str(repo_root),
-        "--incremental",
-        "--run-id", args.run_id,
-    ]
-    if args.grpo_args:
-        cmd.extend(shlex.split(args.grpo_args))
+    def run_grpo(extra: list[str]) -> subprocess.CompletedProcess:
+        cmd = [sys.executable, str(grpo_script), "--repo-root", str(repo_root), *extra]
+        if args.grpo_args:
+            cmd.extend(shlex.split(args.grpo_args))
+        return subprocess.run(cmd)
 
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print("ERROR: Training extraction failed.")
-        return 1
+    result = run_grpo(["--incremental", "--run-id", args.run_id])
+    if result.returncode == 3:
+        print(
+            "Incremental subsystem group wrote 0 items; "
+            "falling back to full Phase-8-locked training..."
+        )
+        result = run_grpo([])
 
-    print("Training extraction updated the memory plane.")
-    print("Future runs should read .recursive/memory/MEMORY.md and use recursive-training-loader.py when experiential memory is relevant.")
-    print("Done.")
-    return 0
+    if result.returncode == 0:
+        print("Training extraction updated the memory plane.")
+        print(
+            "Future runs should read .recursive/memory/MEMORY.md and use "
+            "recursive-training-loader.py when experiential memory is relevant."
+        )
+        print("Done.")
+        return 0
+
+    if result.returncode == 2:
+        print("ERROR: Training extractor is unavailable. Memory plane was not updated.")
+        print(
+            "Wire RECURSIVE_TRAINING_EXTRACTOR_CMD, provide a response file, "
+            "or run agent-operated extraction."
+        )
+        return 2
+
+    if result.returncode == 3:
+        print("Training ran but extracted 0 items. Memory plane was not updated.")
+        return 3
+
+    print("ERROR: Training extraction failed.")
+    return result.returncode or 1
 
 
 if __name__ == "__main__":

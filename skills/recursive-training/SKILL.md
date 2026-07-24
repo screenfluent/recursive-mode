@@ -65,9 +65,16 @@ That means:
 
 - `08-memory-impact.md` is run-local capture
 - `recursive-training-phase8-trigger.py` is the handoff after Phase 8 locks
-- `recursive-training-grpo.py` performs extraction
+- `recursive-training-grpo.py` builds prompts and writes memory after extraction
+- `recursive-training-extract.py` evaluates prompts (required companion; not optional)
 - `recursive-training-loader.py` is the canonical retrieval path before later runs
 - `recursive-training-sync.py` prints startup guidance without mutating the memory plane
+
+Extractor wiring (first match wins):
+
+1. `--response-file` / sibling `<prompt>.response.json` for agent-operated offline evaluation
+2. `RECURSIVE_TRAINING_EXTRACTOR_CMD` with `{prompt_file}` / `{repo_root}` placeholders
+3. otherwise exit `2` (unavailable) — GRPO/trigger must fail, not claim success
 
 Detailed Phase 8 handoff and loader behavior lives in `references/phase8-and-loading.md`.
 
@@ -146,6 +153,8 @@ Default behavior:
 
 - `.recursive/scripts/recursive-training-grpo.py`
 - `.recursive/scripts/recursive-training-grpo.ps1`
+- `.recursive/scripts/recursive-training-extract.py`
+- `.recursive/scripts/recursive-training-extract.ps1`
 - `.recursive/scripts/recursive-training-phase8-trigger.py`
 - `.recursive/scripts/recursive-training-phase8-trigger.ps1`
 - `.recursive/scripts/recursive-training-sync.py`

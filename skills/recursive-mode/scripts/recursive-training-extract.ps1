@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$RepoRoot,
-    [Parameter(Mandatory = $true)][string]$PromptFile
+    [Parameter(Mandatory = $true)][string]$PromptFile,
+    [Parameter()][string]$ResponseFile = ""
 )
 
 Set-StrictMode -Version Latest
@@ -14,5 +15,9 @@ if (-not $python) {
 }
 
 $scriptPath = Join-Path $PSScriptRoot "recursive-training-extract.py"
-& $python $scriptPath "--repo-root" $RepoRoot "--prompt-file" $PromptFile
+$argsList = @("--repo-root", $RepoRoot, "--prompt-file", $PromptFile)
+if ($ResponseFile) {
+    $argsList += @("--response-file", $ResponseFile)
+}
+& $python $scriptPath @argsList
 exit $LASTEXITCODE

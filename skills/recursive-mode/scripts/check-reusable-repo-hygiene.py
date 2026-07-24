@@ -40,6 +40,15 @@ GENERATED_RESIDUE_DIR_NAMES = {
     ".nox",
     "htmlcov",
 }
+# Local scratch dirs to ignore while scanning text, without treating them as publish failures.
+SCAN_SKIP_DIR_NAMES = GENERATED_RESIDUE_DIR_NAMES | {
+    ".tmp",
+    ".cursor",
+    "node_modules",
+    ".benchmark-workspaces",
+    ".benchmark-toolchain",
+    ".worktrees",
+}
 GENERATED_RESIDUE_SUFFIXES = {".pyc", ".pyo", ".pyd"}
 CANONICAL_START_MARKER = "<!-- RECURSIVE-MODE-CANONICAL:START -->"
 CANONICAL_END_MARKER = "<!-- RECURSIVE-MODE-CANONICAL:END -->"
@@ -68,6 +77,8 @@ def iter_text_files(repo_root: Path) -> list[Path]:
         if not path.is_file():
             continue
         if ".git" in path.parts:
+            continue
+        if any(part in SCAN_SKIP_DIR_NAMES for part in path.parts):
             continue
         if is_installed_skill_path(path, repo_root):
             continue

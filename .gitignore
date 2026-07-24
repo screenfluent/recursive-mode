@@ -26,6 +26,10 @@ htmlcov/
 # Local recursive worktrees
 .worktrees/
 
+# Local agent/session scratch
+.tmp/
+.cursor/
+
 # Device-local router discovery inventory
 /.recursive/config/recursive-router-discovered.json
 

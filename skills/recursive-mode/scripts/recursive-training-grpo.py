@@ -125,7 +125,22 @@ class RunParser:
     # File references
     FILE_TABLE_PATTERN = re.compile(r'\|\s*`([^`]+)`\s*\|', re.MULTILINE)
     CODE_POINTER_PATTERN = re.compile(r'-\s*`([^`]+)`', re.MULTILINE)
-    FILE_INLINE_PATTERN = re.compile(r'`([^`]+\.(?:ts|tsx|js|jsx|py|go|rs|json|yaml|yml|md|css|html))`', re.MULTILINE)
+    FILE_INLINE_PATTERN = re.compile(
+        r'`([^`]+\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|py|go|rs|json|yaml|yml|md|css|html))`',
+        re.MULTILINE,
+    )
+    PHASE4_OVERALL_PASS = re.compile(r'Overall\s+Phase\s+4[^\n]*\bPASS\b', re.I)
+    PHASE4_PASS_ROW = re.compile(
+        r'\|\s*([^|]+?)\s*\|\s*(\d+)\s*/\s*(\d+)\s+PASS\b',
+        re.I,
+    )
+    IGNORED_PATH_PREFIXES = (
+        ".recursive/",
+        "evidence/",
+        ".git/",
+        ".worktrees/",
+        "node_modules/",
+    )
 
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
@@ -304,79 +319,145 @@ class RunParser:
 
         return task_type
 
-    def infer_subsystem(self, implementation: str, as_is: str, documents: Dict[str, str]) -> str:
-        # Gather file references from all documents, not just implementation
-        all_text = "\n".join(documents.values())
-        files = self.extract_changed_files(all_text)
+    @classmethod
+    def normalize_repo_path(cls, raw: str) -> str:
+        path = raw.strip().strip("`").replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if path.startswith("/"):
+            path = path[1:]
+        # Drop absolute Windows drive prefixes if they sneak in
+        if re.match(r"^[A-Za-z]:/", path):
+            parts = path.split("/", 2)
+            path = parts[2] if len(parts) == 3 else path
+        return path
 
+    @classmethod
+    def is_noise_path(cls, path: str) -> bool:
+        normalized = cls.normalize_repo_path(path)
+        if not normalized:
+            return True
+        if normalized.startswith(".recursive/") or normalized == ".recursive":
+            return True
+        if any(normalized.startswith(prefix) for prefix in cls.IGNORED_PATH_PREFIXES):
+            return True
+        if "/.recursive/" in f"/{normalized}":
+            return True
+        if re.search(r"(^|/)\.recursive/run/", normalized):
+            return True
+        return False
+
+    def infer_subsystem(self, implementation: str, as_is: str, documents: Dict[str, str]) -> str:
+        preferred_docs = [
+            documents.get("03-implementation-summary.md", ""),
+            documents.get("00-worktree.md", ""),
+            documents.get("04-test-summary.md", ""),
+            implementation,
+            as_is,
+        ]
+        files: List[str] = []
+        for text in preferred_docs:
+            if text:
+                files.extend(self.extract_changed_files(text))
         if not files:
-            files = self.extract_changed_files(implementation) or self.extract_changed_files(as_is)
+            files = self.extract_changed_files("\n".join(documents.values()))
 
         prefixes: Dict[str, int] = {}
-        for f in files:
-            parts = f.split("/")
-            if len(parts) >= 2:
-                key = parts[1] if parts[0] in ("packages", "apps", "libs") and len(parts) >= 3 else parts[0]
-                prefixes[key] = prefixes.get(key, 0) + 1
+        for raw in files:
+            normalized = self.normalize_repo_path(raw)
+            if self.is_noise_path(normalized):
+                continue
+            parts = [p for p in normalized.split("/") if p]
+            if len(parts) < 1:
+                continue
+            if parts[0] in ("packages", "apps", "libs") and len(parts) >= 2:
+                key = parts[1]
+            else:
+                key = parts[0]
+            if not key or key in {".recursive", "evidence", "run"}:
+                continue
+            prefixes[key] = prefixes.get(key, 0) + 1
         return max(prefixes, key=prefixes.get) if prefixes else "general"
 
     def extract_changed_files(self, text: str) -> List[str]:
         files = set()
         for pat in (self.FILE_TABLE_PATTERN, self.CODE_POINTER_PATTERN, self.FILE_INLINE_PATTERN):
             for m in pat.findall(text):
-                if "." in m or "/" in m:
-                    files.add(m.strip())
+                candidate = self.normalize_repo_path(m)
+                if ("." in candidate or "/" in candidate) and not self.is_noise_path(candidate):
+                    files.add(candidate)
         return sorted(files)
 
-    def extract_test_counts(self, all_text: str) -> tuple[int, int]:
-        """Extract (passed, total) from all text using multiple regex patterns."""
+    def extract_test_counts_from_text(self, text: str, *, allow_loose: bool = False) -> tuple[int, int]:
+        """Extract (passed, total). Prefer explicit N/M PASS rows; loose patterns optional."""
         total_passed, total_tests, seen = 0, 0, set()
 
-        # Pattern 1: "94/94 pass"
-        for p, t in self.TEST_SLASH_PATTERN.findall(all_text):
+        for _label, p, t in self.PHASE4_PASS_ROW.findall(text):
+            key = (int(p), int(t))
+            if key not in seen and key[0] <= key[1] and key[1] > 0:
+                # Skip rows that look like RED/historical in the label column context is handled by PASS-only
+                seen.add(key)
+                total_passed += key[0]
+                total_tests += key[1]
+
+        if total_tests > 0:
+            return total_passed, total_tests
+
+        for p, t in self.TEST_SLASH_PATTERN.findall(text):
+            key = (int(p), int(t))
+            if key not in seen and key[0] <= key[1] and key[1] > 0 and key[0] == key[1]:
+                seen.add(key)
+                total_passed += key[0]
+                total_tests += key[1]
+
+        if total_tests > 0:
+            return total_passed, total_tests
+
+        if not allow_loose:
+            return 0, 0
+
+        for p, t in self.TEST_PASSED_PAREN_PATTERN.findall(text):
             key = (int(p), int(t))
             if key not in seen and key[0] <= key[1] and key[1] > 0:
                 seen.add(key)
                 total_passed += key[0]
                 total_tests += key[1]
-
-        # Pattern 2: "65 files, 541 tests" (assume all passed if in PASS context)
-        for f, t in self.TEST_TABLE_PATTERN.findall(all_text):
-            passed = int(t)
-            total = int(t)
-            key = (passed, total)
-            if key not in seen and total > 0:
-                seen.add(key)
-                total_passed += passed
-                total_tests += total
-
-        # Pattern 3: "507 passed (507 tests)"
-        for p, t in self.TEST_PASSED_PAREN_PATTERN.findall(all_text):
-            key = (int(p), int(t))
-            if key not in seen and key[0] <= key[1] and key[1] > 0:
-                seen.add(key)
-                total_passed += key[0]
-                total_tests += key[1]
-
-        # Pattern 4: single "94 pass" — assume all passed
-        for m in self.TEST_SINGLE_PATTERN.finditer(all_text):
-            val = int(m.group(1))
-            key = (val, val)
-            if key not in seen and val > 0:
-                seen.add(key)
-                total_passed += val
-                total_tests += val
-
-        # Pattern 5: "Tests: 94 pass"
-        for m in self.TEST_LABEL_PATTERN.finditer(all_text):
-            val = int(m.group(1))
-            key = (val, val)
-            if key not in seen and val > 0:
-                seen.add(key)
-                total_passed += val
-                total_tests += val
 
         return total_passed, total_tests
+
+    def extract_test_counts(self, documents: Dict[str, str] | str) -> tuple[int, int]:
+        """Prefer Phase 4 primary suite PASS rows; do not soup RED history from all markdown."""
+        if isinstance(documents, str):
+            return self.extract_test_counts_from_text(documents, allow_loose=False)
+
+        phase4 = documents.get("04-test-summary.md", "")
+        if phase4:
+            # Drop historical RED sections before counting
+            cleaned_lines = []
+            for line in phase4.splitlines():
+                lower = line.lower()
+                if "red" in lower and ("historical" in lower or "fail as expected" in lower):
+                    continue
+                if re.search(r'\bFAIL as expected\b', line, re.I):
+                    continue
+                cleaned_lines.append(line)
+            cleaned = "\n".join(cleaned_lines)
+            passed, total = self.extract_test_counts_from_text(cleaned, allow_loose=False)
+            if total > 0:
+                return passed, total
+            if self.PHASE4_OVERALL_PASS.search(phase4):
+                # Gates + overall PASS with no reliable counts → treat as complete (0/0)
+                return 0, 0
+
+        # Fallback: green-only slash totals from implementation/test docs (no loose "N pass")
+        for key in ("04-test-summary.md", "03-implementation-summary.md"):
+            text = documents.get(key, "")
+            if not text:
+                continue
+            passed, total = self.extract_test_counts_from_text(text, allow_loose=False)
+            if total > 0:
+                return passed, total
+        return 0, 0
 
     def extract_reward_signals(self, documents: Dict[str, str]) -> dict:
         all_text = "\n\n".join(documents.values())
@@ -386,7 +467,7 @@ class RunParser:
         approval_matches = self.APPROVAL_PATTERN.findall(all_text)
         qa_matches = self.QA_VERDICT_PATTERN.findall(all_text)
 
-        total_passed, total_tests = self.extract_test_counts(all_text)
+        total_passed, total_tests = self.extract_test_counts(documents)
 
         has_audit_fail = any("FAIL" in m.upper() for m in audit_matches)
         coverage_pass = any("PASS" in m.upper() for m in coverage_matches) and not any("FAIL" in m.upper() for m in coverage_matches)
@@ -485,17 +566,40 @@ class RunParser:
         )
 
 
-def parse_all_runs(runs_dir: Path) -> List[RecursiveRollout]:
+def phase8_is_locked(run_dir: Path) -> bool:
+    phase8 = run_dir / "08-memory-impact.md"
+    if not phase8.exists():
+        return False
+    text = phase8.read_text(encoding="utf-8")
+    return bool(re.search(r"(?m)^Status:\s*`?LOCKED`?\s*$", text)) or "LockedAt:" in text
+
+
+def parse_all_runs(runs_dir: Path, *, require_phase8_locked: bool = True) -> List[RecursiveRollout]:
     rollouts = []
     if not runs_dir.exists():
         return rollouts
     for run_dir in sorted(runs_dir.iterdir()):
-        if run_dir.is_dir() and any(run_dir.glob("*.md")):
-            r = RunParser(run_dir).parse()
-            if r:
-                rollouts.append(r)
+        if not (run_dir.is_dir() and any(run_dir.glob("*.md"))):
+            continue
+        if require_phase8_locked and not phase8_is_locked(run_dir):
+            continue
+        r = RunParser(run_dir).parse()
+        if r:
+            rollouts.append(r)
     return rollouts
 
+
+def filter_rollouts_for_training(
+    rollouts: List[RecursiveRollout],
+    incremental_run_id: Optional[str] = None,
+) -> List[RecursiveRollout]:
+    """Incremental mode keeps the target run plus peers in the same subsystem."""
+    if not incremental_run_id:
+        return list(rollouts)
+    target = next((r for r in rollouts if r.run_id == incremental_run_id), None)
+    if target is None:
+        return []
+    return [r for r in rollouts if r.subsystem == target.subsystem]
 
 # ---------------------------------------------------------------------------
 # Grouping with hierarchical prefix fallback
@@ -812,9 +916,16 @@ class ReasoningBankMemory:
         self.root = Path(repo_root)
         self.domains_dir = self.root / self.MEMORY_DIR / self.DOMAINS_DIR
         self.training_dir = self.root / self.MEMORY_DIR / self.TRAINING_DIR
+        self.memory_index = self.root / self.MEMORY_DIR / "MEMORY.md"
         self.domains_dir.mkdir(parents=True, exist_ok=True)
         self.training_dir.mkdir(parents=True, exist_ok=True)
         self._rb_counter = self._load_max_rb_id()
+
+    @staticmethod
+    def _domain_filename(subsystem: str) -> str:
+        cleaned = re.sub(r'[^a-zA-Z0-9_-]+', '-', subsystem.strip().lower())
+        cleaned = cleaned.strip('-_') or "general"
+        return f"{cleaned}.md"
 
     def _load_max_rb_id(self) -> int:
         max_id = -1
@@ -831,26 +942,78 @@ class ReasoningBankMemory:
         self._rb_counter += 1
         return f"RB-{self._rb_counter}"
 
+    def existing_titles(self) -> set[str]:
+        titles: set[str] = set()
+        for d in (self.domains_dir, self.training_dir):
+            if not d.exists():
+                continue
+            for f in d.glob("*.md"):
+                content = f.read_text(encoding="utf-8")
+                for m in re.finditer(r'### RB-\d+:\s*(.+)', content):
+                    titles.add(m.group(1).strip().lower())
+        return titles
+
+    def assign_rb_ids(self, items: List[dict]) -> List[dict]:
+        """Assign a stable rb_id once per item before dual writes."""
+        prepared = []
+        for item in items:
+            cloned = dict(item)
+            if not cloned.get("rb_id"):
+                cloned["rb_id"] = self._next_rb_id()
+            prepared.append(cloned)
+        return prepared
+
+    def filter_new_items(self, items: List[dict]) -> List[dict]:
+        existing = self.existing_titles()
+        fresh = []
+        for item in items:
+            title = str(item.get("title", "")).strip().lower()
+            if not title or title in existing:
+                continue
+            existing.add(title)
+            fresh.append(item)
+        return fresh
+
     def _compute_success_rate(self, source_runs: List[str], winner_runs: List[str]) -> float:
         if not source_runs:
             return 0.0
         return len(winner_runs) / len(source_runs)
 
+    def _product_owns_paths(self, changed_paths: List[str]) -> List[str]:
+        owns = []
+        for raw in changed_paths:
+            path = RunParser.normalize_repo_path(raw)
+            if RunParser.is_noise_path(path):
+                continue
+            if " | " in path or "Status:" in path or "Changed Files:" in path:
+                continue
+            if len(path) > 180:
+                continue
+            if not (("/" in path) or re.search(r"\.[A-Za-z0-9]{1,8}$", path)):
+                continue
+            owns.append(path)
+            if len(owns) >= 10:
+                break
+        return owns
+
     def write_domain_memory(
         self, subsystem: str, items: List[dict], source_runs: List[str],
         winner_runs: List[str], changed_paths: List[str]
-    ):
-        domain_name = re.sub(r'[^a-zA-Z0-9_-]', '-', subsystem.lower())
-        domain_file = self.domains_dir / f"{domain_name}.md"
+    ) -> List[dict]:
+        items = self.filter_new_items(items)
+        if not items:
+            return []
+        items = self.assign_rb_ids(items)
+        domain_file = self.domains_dir / self._domain_filename(subsystem)
         existing = domain_file.read_text(encoding="utf-8") if domain_file.exists() else ""
         now = datetime.now(timezone.utc).isoformat()
         success_rate = self._compute_success_rate(source_runs, winner_runs)
 
         new_section = f"\n## ReasoningBank Items ({now})\n\n"
         for item in items:
-            rb_id = self._next_rb_id()
+            rb_id = item.get("rb_id") or self._next_rb_id()
+            item["rb_id"] = rb_id
             applies_to = item.get("applies_to", [])
-            applies_str = ", ".join(applies_to) if applies_to else ""
             new_section += (
                 f"### {rb_id}: {item['title']}\n\n"
                 f"**Description:** {item['description']}\n\n"
@@ -870,7 +1033,8 @@ class ReasoningBankMemory:
             )
 
         if not existing:
-            owns = ", ".join(changed_paths[:10]) if changed_paths else "TBD"
+            owns_list = self._product_owns_paths(changed_paths)
+            owns = ", ".join(owns_list) if owns_list else "TBD"
             header = (
                 f"---\nType: domain\nStatus: CURRENT\nScope: {subsystem}\n"
                 f"Owns-Paths: {owns}\nWatch-Paths:\n"
@@ -889,6 +1053,7 @@ class ReasoningBankMemory:
             else:
                 content = existing + "\n" + new_section
         domain_file.write_text(content, encoding="utf-8")
+        return items
 
     def write_training_memory(
         self,
@@ -898,6 +1063,17 @@ class ReasoningBankMemory:
         source_runs: List[str],
         winner_runs: List[str],
     ):
+        # Training fan-out reuses rb_ids already assigned; do not re-filter titles
+        # when items were already filtered for domain write. Still skip empty.
+        if not items:
+            return
+        prepared = []
+        for item in items:
+            cloned = dict(item)
+            if not cloned.get("rb_id"):
+                cloned["rb_id"] = self._next_rb_id()
+            prepared.append(cloned)
+        items = prepared
         task_file = self.training_dir / f"{task_type}.md"
         existing = task_file.read_text(encoding="utf-8") if task_file.exists() else ""
         now = datetime.now(timezone.utc).isoformat()
@@ -906,7 +1082,7 @@ class ReasoningBankMemory:
 
         new_section = f"\n## Extracted Reasoning Items ({now})\n\n"
         for item in items:
-            rb_id = self._next_rb_id()
+            rb_id = item.get("rb_id") or self._next_rb_id()
             applies_to = item.get("applies_to", [])
             new_section += (
                 f"### {rb_id}: {item['title']}\n\n"
@@ -945,6 +1121,47 @@ class ReasoningBankMemory:
             content = existing + "\n" + new_section
         task_file.write_text(content, encoding="utf-8")
 
+    def refresh_memory_index(self) -> None:
+        """Refresh MEMORY.md registry bullets for domains/ and training/ shards."""
+        if not self.memory_index.exists():
+            return
+        original = self.memory_index.read_text(encoding="utf-8")
+        bullets = []
+        for folder, label in ((self.domains_dir, "domains"), (self.training_dir, "training")):
+            if not folder.exists():
+                continue
+            for path in sorted(folder.glob("*.md")):
+                rel = f"{label}/{path.name}"
+                text = path.read_text(encoding="utf-8")
+                if "Status: CURRENT" not in text and "Status: SUSPECT" not in text:
+                    continue
+                title_match = re.search(r'^#\s+(.+)$', text, re.M)
+                title = title_match.group(1).strip() if title_match else path.stem
+                source = ""
+                source_match = re.search(r'(?m)^Source-Runs:\s*(.+)$', text)
+                if source_match:
+                    source = f" (Source-Runs: {source_match.group(1).strip()})"
+                bullets.append(f"- `{rel}` — {title}{source}")
+
+        if not bullets:
+            return
+
+        block = "## Training Extraction Registry\n\n" + "\n".join(bullets) + "\n"
+        marker_start = "<!-- RECURSIVE-TRAINING-REGISTRY:START -->"
+        marker_end = "<!-- RECURSIVE-TRAINING-REGISTRY:END -->"
+        wrapped = f"{marker_start}\n{block}{marker_end}"
+        if marker_start in original and marker_end in original:
+            pattern = re.compile(
+                re.escape(marker_start) + r".*?" + re.escape(marker_end),
+                re.DOTALL,
+            )
+            updated = pattern.sub(wrapped, original)
+        elif "## Registry" in original:
+            updated = original.replace("## Registry", f"## Registry\n\n{wrapped}\n", 1)
+        else:
+            updated = original.rstrip() + "\n\n" + wrapped + "\n"
+        self.memory_index.write_text(updated, encoding="utf-8")
+
     def load_all_items_flat(self) -> Dict[str, str]:
         """Load all items as flat dict for tool-file generation."""
         items = {}
@@ -977,17 +1194,25 @@ async def train_repo(
     repo_root: str,
     incremental_run_id: Optional[str] = None,
     winner_only_threshold: int = MIN_WINNER_ONLY_GROUP_SIZE,
-) -> None:
+) -> int:
     repo_path = Path(repo_root).resolve()
     runs_dir = repo_path / ".recursive" / "run"
     if not runs_dir.exists():
         print(f"ERROR: No .recursive/run/ at {runs_dir}")
-        sys.exit(1)
+        return 1
 
     print(f"Scanning {runs_dir} ...")
-    rollouts = parse_all_runs(runs_dir)
+    rollouts = parse_all_runs(runs_dir, require_phase8_locked=True)
     if incremental_run_id:
-        rollouts = [r for r in rollouts if r.run_id == incremental_run_id]
+        before = len(rollouts)
+        rollouts = filter_rollouts_for_training(rollouts, incremental_run_id)
+        print(
+            f"Incremental filter for {incremental_run_id}: "
+            f"kept {len(rollouts)}/{before} rollouts in the target subsystem"
+        )
+        if not rollouts:
+            print(f"ERROR: Run '{incremental_run_id}' not found among Phase-8-locked training inputs.")
+            return 1
     print(f"Loaded {len(rollouts)} rollouts from {len({r.run_id for r in rollouts})} runs")
     if len(rollouts) < 2:
         print("WARNING: < 2 rollouts. Results will be weak.")
@@ -1001,6 +1226,8 @@ async def train_repo(
 
     total_items = 0
     processed = 0
+    skipped_insufficient = 0
+    extractor_failed = False
 
     for subsystem, group in groups.items():
         print(f"\nSubsystem: {subsystem} ({len(group)} rollouts)")
@@ -1011,11 +1238,12 @@ async def train_repo(
             w = sum(1 for r in group if r.is_complete_winner)
             l = len(group) - w
             print(f"  Skipping — insufficient signal ({w} wins, {l} losses, threshold={winner_only_threshold})")
+            skipped_insufficient += 1
             continue
 
         print(f"  Mode: {mode} ({len(winners)} wins, {len(losers)} losses)")
 
-        # Load existing items for deduplication
+        # Load existing items for deduplication hints in the prompt
         existing_items = []
         for d in (rb_memory.domains_dir, rb_memory.training_dir):
             for f in d.glob("*.md"):
@@ -1037,46 +1265,64 @@ async def train_repo(
                 mode, subsystem, winners, losers, existing_items
             )
         except ExtractionUnavailableError as exc:
-            print(f"\nTraining skipped: {exc}")
-            return
+            print(f"\nTraining failed: {exc}")
+            extractor_failed = True
+            break
 
+        items = rb_memory.filter_new_items(items)
         if items:
-            # Distribute items by their self-declared task_type.
-            # A single run can produce learnings about many task types.
             items_by_task_type: Dict[str, List[dict]] = defaultdict(list)
-            for item in items:
-                tt = item.get("task_type", "general")
-                items_by_task_type[tt].append(item)
 
             source_runs = list({r.run_id for r in group})
             winner_runs = list({r.run_id for r in group if r.is_complete_winner})
             changed_paths = list({f for r in group for f in r.changed_files})
 
-            # Write ALL items to domain memory (subsystem-level)
-            rb_memory.write_domain_memory(subsystem, items, source_runs, winner_runs, changed_paths)
+            written = rb_memory.write_domain_memory(
+                subsystem, items, source_runs, winner_runs, changed_paths
+            )
+            if not written:
+                print(f"  No new items after dedup")
+                continue
 
-            # Write items to training memory files by their self-declared task_type
+            for item in written:
+                tt = item.get("task_type", "general")
+                items_by_task_type[tt].append(item)
+
             for tt, task_items in items_by_task_type.items():
                 rb_memory.write_training_memory(tt, subsystem, task_items, source_runs, winner_runs)
 
-            print(f"  Added {len(items)} items across {len(items_by_task_type)} task types:")
+            print(f"  Added {len(written)} items across {len(items_by_task_type)} task types:")
             for tt, task_items in sorted(items_by_task_type.items()):
                 print(f"    [{tt}] ({len(task_items)} items)")
                 for item in task_items:
                     print(f"      - [{item.get('rb_id', 'NEW')}] {item['title']}: {item['description'][:60]}...")
-            total_items += len(items)
+            total_items += len(written)
             processed += 1
         else:
             print(f"  No items extracted")
 
+    if extractor_failed:
+        print(f"\nTraining aborted: extractor unavailable ({processed} groups processed, {total_items} items extracted)")
+        return 2
+
+    if total_items > 0:
+        rb_memory.refresh_memory_index()
+
     print(f"\nTraining complete: {processed} groups processed, {total_items} items extracted")
+    if total_items == 0:
+        if skipped_insufficient == len(groups) or processed == 0:
+            print("No training items written (insufficient groups or empty extraction).")
+            return 3
+    return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="Repository-local Training-Free GRPO + ReasoningBank")
     parser.add_argument("--repo-root", type=str, required=True)
-    parser.add_argument("--incremental", action="store_true")
-    parser.add_argument("--run-id", type=str)
+    parser.add_argument("--incremental", action="store_true",
+                        help="Limit extraction to the subsystem of --run-id, keeping peer runs in that subsystem")
+    parser.add_argument("--run-id", type=str,
+                        help="Target run id (required with --incremental)")
     parser.add_argument("--winner-only-threshold", type=int, default=MIN_WINNER_ONLY_GROUP_SIZE,
                         help="Minimum winners for winner-only extraction when no losers exist (default: 2)")
     args = parser.parse_args()
@@ -1084,8 +1330,11 @@ def main():
     if args.incremental and not args.run_id:
         print("ERROR: --incremental requires --run-id")
         sys.exit(1)
+    if args.run_id and not args.incremental:
+        print("NOTE: --run-id without --incremental is ignored; passing all Phase-8-locked runs.")
 
-    asyncio.run(train_repo(args.repo_root, args.run_id, args.winner_only_threshold))
+    incremental_id = args.run_id if args.incremental else None
+    raise SystemExit(asyncio.run(train_repo(args.repo_root, incremental_id, args.winner_only_threshold)))
 
 
 if __name__ == "__main__":

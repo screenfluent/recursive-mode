@@ -452,17 +452,23 @@ def run_phase8_training_trigger(repo_root: Path, run_id: str) -> int:
         "--auto",
     ]
     result = subprocess.run(command, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        details = result.stderr.strip() or result.stdout.strip() or "no diagnostics emitted"
-        print(f"[FAIL] recursive-training Phase 8 trigger failed: {details}")
-        return result.returncode or 1
+    if result.returncode == 0:
+        print("[OK] Ran recursive-training Phase 8 trigger.")
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        if result.stderr.strip():
+            print(result.stderr.strip())
+        return 0
 
-    print("[OK] Ran recursive-training Phase 8 trigger.")
-    if result.stdout.strip():
-        print(result.stdout.strip())
-    if result.stderr.strip():
-        print(result.stderr.strip())
-    return 0
+    details = result.stderr.strip() or result.stdout.strip() or "no diagnostics emitted"
+    if result.returncode in (2, 3):
+        print(f"[WARN] recursive-training Phase 8 trigger did not update memory (exit {result.returncode}): {details}")
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        return result.returncode
+
+    print(f"[FAIL] recursive-training Phase 8 trigger failed: {details}")
+    return result.returncode or 1
 
 
 def main() -> int:

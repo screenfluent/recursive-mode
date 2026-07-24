@@ -559,7 +559,9 @@ Phase 8 — Memory maintenance and impact review
 - Audit must verify memory updates and status transitions against reviewed final product/worktree paths, touched memory docs, prior memory truth, `STATE.md`, and `DECISIONS.md`
 - Must include `## Run-Local Skill Usage Capture` with concrete availability / attempted / used / worked-well / issue / recommendation fields whenever skill usage is relevant to the run
 - Must include `## Skill Memory Promotion Review` explaining what durable lessons were promoted, what stayed run-local, and why
-- If the optional `recursive-training` skill is installed, run `/.recursive/scripts/recursive-training-phase8-trigger.py` immediately after `08-memory-impact.md` locks to extract or refresh cross-run experiential learnings. `recursive-closeout` itself does not auto-invoke the trigger.
+- If the optional `recursive-training` skill is installed, run `/.recursive/scripts/recursive-training-phase8-trigger.py` immediately after `08-memory-impact.md` locks to extract or refresh cross-run experiential learnings.
+- `recursive-lock` does not invoke training by itself. After Phase 8 locks, either run the trigger directly or re-run `recursive-closeout --phase 08` (without `--force`) so the helper can call `recursive-training-phase8-trigger.py --auto`.
+- Treat trigger/GRPO exit `2` (extractor unavailable) and exit `3` (zero items written) as unsuccessful training; do not claim the memory plane was updated.
 - **TODO Requirement:** Phase artifact MUST include `## TODO` section with checkable items
 - **TODO Enforcement:** ALL TODO items must be checked off before locking
 - **Completion rule:** the run is not fully complete before Phase 8 passes
