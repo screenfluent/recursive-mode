@@ -218,6 +218,8 @@ class SmokeHarness:
         try:
             env = os.environ.copy()
             env["PYTHONDONTWRITEBYTECODE"] = "1"
+            if self.powershell_exe is not None and Path(command[0]).resolve() == self.powershell_exe.resolve():
+                env["PYTHON"] = str(self.python_exe)
             completed = subprocess.run(
                 command,
                 cwd=str(cwd or self.repo_root),
