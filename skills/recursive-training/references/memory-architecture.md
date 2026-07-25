@@ -39,7 +39,9 @@ The intent is a compact, reusable memory item rather than a long narrative dump.
 
 ## Training data source
 
-The parser treats **all** markdown in each completed run folder as eligible evidence, including:
+Only Phase-8-locked runs are eligible training inputs by default (`08-memory-impact.md` with `Status: LOCKED` / `LockedAt`).
+
+Within those runs, the parser treats **all** markdown as eligible evidence, including:
 
 - `00-requirements.md`
 - `01-as-is.md`
@@ -60,7 +62,7 @@ Reward and classification signals come from the artifacts themselves, including:
 - coverage and approval gates
 - QA verdict or equivalent approval markers
 - build/typecheck pass or fail
-- test counts and pass/fail signals
+- Phase 4 primary suite PASS rows (`04-test-summary.md`); historical RED / “FAIL as expected” rows are ignored
 - evidence of implementation and verification across the run artifacts
 
 If a run has neither implementation evidence nor test evidence anywhere in its markdown set, it should be treated as critically incomplete.
@@ -69,13 +71,21 @@ If a run has neither implementation evidence nor test evidence anywhere in its m
 
 Group runs by **subsystem only**.
 
-Why:
+Subsystem inference prefers product paths from implementation / worktree / test artifacts:
+
+- strip leading `/` from repo-rooted paths
+- ignore `.recursive/**` and run-evidence noise
+- majority-vote the remaining top-level product prefixes (`scripts`, `packages/<name>`, etc.)
+
+Why subsystem-only grouping:
 
 - one run often teaches multiple lessons at once
 - `00-requirements.md`, `02-to-be-plan.md`, `03-implementation-summary.md`, and `04-test-summary.md` can all yield different task-type learnings
 - grouping by task type too early would throw away those cross-cutting signals
 
 The extractor, not the grouping stage, decides each learning item's `task_type`.
+
+Incremental training (`--incremental --run-id`) keeps the target run plus peers that share its subsystem.
 
 ## Extraction modes
 
@@ -91,7 +101,9 @@ After a successful extraction pass:
 
 - subsystem items live in `/.recursive/memory/domains/<subsystem>.md`
 - task-type items live in `/.recursive/memory/training/<task-type>.md`
-- `/.recursive/memory/MEMORY.md` remains the discovery router
+- `/.recursive/memory/MEMORY.md` remains the discovery router and may receive a
+  `<!-- RECURSIVE-TRAINING-REGISTRY:... -->` refresh block listing CURRENT/SUSPECT
+  domain and training shards
 - pointer files such as `.cursorrules`, `CLAUDE.md`, and `.github/copilot-instructions.md` stay non-authoritative
 
 Files never modified by training:
@@ -100,6 +112,9 @@ Files never modified by training:
 - files outside the current git working tree
 - locked earlier-phase artifacts
 - `AGENTS.md` bridges
+
+Note: `recursive-training-sync.py` remains read-only. Registry refresh is owned by
+successful `recursive-training-grpo.py` writes, not by sync.
 
 ## Script boundary
 

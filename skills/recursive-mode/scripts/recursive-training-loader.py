@@ -494,7 +494,19 @@ class MemoryLoader:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _configure_utf8_stdout() -> None:
+    """Avoid Windows cp1252 crashes when memory items contain arrows/unicode."""
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 def main():
+    _configure_utf8_stdout()
     parser = argparse.ArgumentParser(
         description="Progressive memory loader for recursive-mode experiential knowledge"
     )

@@ -301,6 +301,30 @@ class RecursiveTrainingTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2)
         self.assertIn("Training extractor is not available", completed.stderr)
 
+    def test_training_extract_script_honors_response_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="recursive-training-extract-") as temp_dir:
+            prompt = Path(temp_dir) / "prompt.txt"
+            response = Path(temp_dir) / "items.json"
+            prompt.write_text("extract", encoding="utf-8")
+            response.write_text('[{"title":"T","description":"D","content":"C"}]', encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "recursive-training-extract.py"),
+                    "--repo-root",
+                    str(SCRIPT_DIR.parent),
+                    "--prompt-file",
+                    str(prompt),
+                    "--response-file",
+                    str(response),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn('"title":"T"', completed.stdout)
+
     def test_training_grpo_uses_generic_extractor_contract(self) -> None:
         source = (SCRIPT_DIR / "recursive-training-grpo.py").read_text(encoding="utf-8")
 
@@ -328,6 +352,171 @@ class RecursiveTrainingTests(unittest.TestCase):
 
         content = (repo_root / ".recursive" / "memory" / "training" / "commit-workflow.md").read_text(encoding="utf-8")
         self.assertIn('subsystem: "git-workflow"', content)
+
+    def test_powershell_wrappers_do_not_pass_removed_llm_provider(self) -> None:
+        for name in (
+            "recursive-training-grpo.ps1",
+            "recursive-training-phase8-trigger.ps1",
+            "recursive-training-extract.ps1",
+        ):
+            text = (SCRIPT_DIR / name).read_text(encoding="utf-8")
+            self.assertNotIn("llm-provider", text.lower().replace("_", "-"))
+            self.assertNotIn("LlmProvider", text)
+
+    def test_shared_rb_id_and_dedup_across_domain_and_training_writes(self) -> None:
+        repo_root = self.create_repo()
+        rb = training_grpo.ReasoningBankMemory(repo_root)
+        item = {
+            "title": "Shared identity",
+            "description": "One id",
+            "content": "Same learning once.",
+            "task_type": "commit-workflow",
+            "applies_to": ["scripts/"],
+        }
+        written = rb.write_domain_memory("scripts", [item], ["run-a"], ["run-a"], ["scripts/a.mjs"])
+        self.assertEqual(len(written), 1)
+        rb.write_training_memory("shared-identity-workflow", "scripts", written, ["run-a"], ["run-a"])
+        # Second identical domain write should dedup
+        again = rb.write_domain_memory("scripts", [item], ["run-b"], ["run-b"], ["scripts/b.mjs"])
+        self.assertEqual(again, [])
+
+        domain = (repo_root / ".recursive" / "memory" / "domains" / "scripts.md").read_text(encoding="utf-8")
+        training = (repo_root / ".recursive" / "memory" / "training" / "shared-identity-workflow.md").read_text(encoding="utf-8")
+        import re
+        self.assertEqual(re.findall(r'rb_id: "(RB-\d+)"', domain), re.findall(r'rb_id: "(RB-\d+)"', training))
+        self.assertEqual(domain.count("### RB-"), 1)
+
+    def test_phase4_pass_rows_ignore_red_and_phase8_gate(self) -> None:
+        repo_root = self.create_repo()
+        runs = repo_root / ".recursive" / "run"
+        complete = runs / "80-complete"
+        incomplete = runs / "82-incomplete"
+        for run_dir, with_phase8 in ((complete, True), (incomplete, False)):
+            run_dir.mkdir(parents=True)
+            (run_dir / "00-requirements.md").write_text(
+                "Status: LOCKED\n\nThis run implements product work.\n\n"
+                "- `scripts/track-b/a.mjs`\nCoverage: PASS\nApproval: PASS\n"
+                "## Audit Verdict\n\n**PASS**\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (run_dir / "03-implementation-summary.md").write_text(
+                "Status: LOCKED\n\n- `scripts/track-b/a.mjs`\nCoverage: PASS\nApproval: PASS\n"
+                "## Audit Verdict\n\n**PASS**\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (run_dir / "04-test-summary.md").write_text(
+                "Status: LOCKED\nCoverage: PASS\nApproval: PASS\n## Audit Verdict\n\n**PASS**\n\n"
+                "## Results Summary\n\n| Suite | Result |\n|---|---|\n"
+                "| Bindings | 5/5 PASS |\n| Historical RED | 4/5 FAIL as expected |\n\n"
+                "Overall Phase 4 automated verdict: PASS\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (run_dir / "05-manual-qa.md").write_text(
+                "Status: LOCKED\n\n## QA Verdict\n\n**PASS**\nApproval: PASS\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            if with_phase8:
+                (run_dir / "08-memory-impact.md").write_text(
+                    "Status: LOCKED\nLockedAt: 2026-07-25T00:00:00Z\nCoverage: PASS\nApproval: PASS\n"
+                    "## Audit Verdict\n\n**PASS**\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+
+        rollouts = training_grpo.parse_all_runs(runs)
+        ids = {r.run_id for r in rollouts}
+        self.assertIn("80-complete", ids)
+        self.assertNotIn("82-incomplete", ids)
+        winner = next(r for r in rollouts if r.run_id == "80-complete")
+        self.assertTrue(winner.is_complete_winner)
+        self.assertEqual(winner.subsystem, "scripts")
+
+    def test_incremental_keeps_subsystem_peers_only(self) -> None:
+        repo_root = self.create_repo()
+        runs = repo_root / ".recursive" / "run"
+
+        def add_run(run_id: str, path: str) -> None:
+            run_dir = runs / run_id
+            run_dir.mkdir(parents=True)
+            for name in (
+                "00-requirements.md",
+                "03-implementation-summary.md",
+                "04-test-summary.md",
+                "05-manual-qa.md",
+                "08-memory-impact.md",
+            ):
+                body = (
+                    f"Status: LOCKED\nLockedAt: 2026-07-25T00:00:00Z\n"
+                    f"Coverage: PASS\nApproval: PASS\n## Audit Verdict\n\n**PASS**\n\n"
+                    f"- `{path}`\n\n## Results Summary\n\n| Suite | Result |\n|---|---|\n"
+                    f"| Unit | 1/1 PASS |\n\nOverall Phase 4 automated verdict: PASS\n\n"
+                    f"## QA Verdict\n\n**PASS**\n"
+                )
+                (run_dir / name).write_text(body, encoding="utf-8", newline="\n")
+
+        add_run("79-a", "scripts/a.mjs")
+        add_run("80-b", "scripts/b.mjs")
+        add_run("81-other", "extensions/foo.ts")
+        rollouts = training_grpo.parse_all_runs(runs)
+        filtered = training_grpo.filter_rollouts_for_training(rollouts, "80-b")
+        ids = {r.run_id for r in filtered}
+        self.assertEqual(ids, {"79-a", "80-b"})
+
+    def test_grpo_exits_nonzero_when_extractor_unavailable(self) -> None:
+        repo_root = self.create_repo()
+        runs = repo_root / ".recursive" / "run"
+        for run_id in ("79-a", "80-b"):
+            run_dir = runs / run_id
+            run_dir.mkdir(parents=True)
+            for name in (
+                "00-requirements.md",
+                "03-implementation-summary.md",
+                "04-test-summary.md",
+                "05-manual-qa.md",
+                "08-memory-impact.md",
+            ):
+                (run_dir / name).write_text(
+                    "Status: LOCKED\nLockedAt: 2026-07-25T00:00:00Z\n"
+                    "Coverage: PASS\nApproval: PASS\n## Audit Verdict\n\n**PASS**\n\n"
+                    "- `scripts/a.mjs`\n\n## Results Summary\n\n| Suite | Result |\n|---|---|\n"
+                    "| Unit | 1/1 PASS |\n\nOverall Phase 4 automated verdict: PASS\n\n"
+                    "## QA Verdict\n\n**PASS**\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "recursive-training-grpo.py"),
+                "--repo-root",
+                str(repo_root),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+
+    def test_closeout_warns_when_phase8_trigger_exits_non_success(self) -> None:
+        repo_root = self.create_repo()
+        scripts_dir = repo_root / ".recursive" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "recursive-training-phase8-trigger.py").write_text(
+            "import sys\nprint('no items')\nsys.exit(3)\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = recursive_closeout.run_phase8_training_trigger(repo_root, "run-123")
+        self.assertEqual(result, 3)
+        self.assertIn("[WARN]", stdout.getvalue())
+        self.assertNotIn("[OK] Ran recursive-training Phase 8 trigger.", stdout.getvalue())
 
 
 if __name__ == "__main__":

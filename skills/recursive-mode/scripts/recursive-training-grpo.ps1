@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     Thin wrapper that calls recursive-training-grpo.py with the same arguments.
-    Falls back to instructions if Python is not available.
+    Extraction is delegated to recursive-training-extract.py (response-file or
+    RECURSIVE_TRAINING_EXTRACTOR_CMD). This wrapper does not select an LLM provider.
 #>
 
 [CmdletBinding()]
@@ -14,14 +15,13 @@ param(
     [string]$RepoRoot,
 
     [Parameter()]
-    [ValidateSet("kimi", "openai", "anthropic")]
-    [string]$LlmProvider = "kimi",
-
-    [Parameter()]
     [switch]$Incremental,
 
     [Parameter()]
-    [string]$RunId
+    [string]$RunId,
+
+    [Parameter()]
+    [int]$WinnerOnlyThreshold = 0
 )
 
 $python = Get-Command python -ErrorAction SilentlyContinue
@@ -30,19 +30,23 @@ if (-not $python) {
 }
 
 if (-not $python) {
-    Write-Error "Python is required but not found. Please install Python 3.10+ and the 'openai' package."
+    Write-Error "Python is required but not found. Please install Python 3.10+."
     exit 1
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pyScript = Join-Path $scriptDir "recursive-training-grpo.py"
 
-$argsList = @("--repo-root", $RepoRoot, "--llm-provider", $LlmProvider)
+$argsList = @("--repo-root", $RepoRoot)
 if ($Incremental) {
     $argsList += "--incremental"
 }
 if ($RunId) {
     $argsList += @("--run-id", $RunId)
 }
+if ($WinnerOnlyThreshold -gt 0) {
+    $argsList += @("--winner-only-threshold", "$WinnerOnlyThreshold")
+}
 
 & $python.Source $pyScript @argsList
+exit $LASTEXITCODE

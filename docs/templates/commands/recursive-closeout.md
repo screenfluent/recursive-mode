@@ -44,4 +44,4 @@ pwsh -NoProfile -File "<SKILL_DIR>/scripts/recursive-closeout.ps1" -RepoRoot . -
 1. Scaffold the closeout phase with `recursive-closeout`.
 2. Replace the scaffold guidance with the actual evidence, decisions, state, or memory changes.
 3. Run `recursive-lock` only after the phase content is complete and the required gates pass.
-4. After locking Phase 8, rerun `recursive-closeout` for phase `08` without `--force` if you want the built-in training trigger hook to fire from this helper.
+4. After locking Phase 8, rerun `recursive-closeout` for phase `08` without `--force` if you want the built-in training trigger hook to fire from this helper. Treat trigger exit `2`/`3` as unsuccessful (no memory update).
