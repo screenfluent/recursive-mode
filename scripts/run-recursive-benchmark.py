@@ -438,7 +438,7 @@ class BenchmarkHarness:
         self.judge_timeout = min(self.max_seconds, DEFAULT_JUDGE_TIMEOUT_SECONDS)
         self.command_timeout = max(60, args.command_timeout)
         self.preview_timeout = max(15, args.preview_timeout)
-        self.run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz")
         self.results: list[ArmResult] = []
         self.summary_notes: list[str] = []
         self.effective_arm_modes: dict[str, str] = {}

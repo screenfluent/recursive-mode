@@ -14,8 +14,12 @@ from pathlib import Path
 
 EVIDENCE_SUBDIRECTORIES = ("screenshots", "logs", "perf", "traces", "reviews", "review-bundles", "router", "other")
 import re
+import stat
 import subprocess
 import sys
+
+RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 def write_utf8_no_bom(path: Path, content: str) -> None:
@@ -30,6 +34,72 @@ def ensure_directory(path: Path) -> None:
         print(f"[OK] Directory exists: {path}")
 
 
+def is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def is_link_or_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return bool(attributes & WINDOWS_REPARSE_POINT)
+
+
+def run_directory_error(repo_root: Path, run_root: Path, run_dir: Path) -> str | None:
+    recursive_root = repo_root / ".recursive"
+    evidence_dir = run_dir / "evidence"
+    checks = [
+        (recursive_root, repo_root, ".recursive control directory"),
+        (run_root, recursive_root, "run root directory"),
+        (run_dir, run_root, "run directory"),
+        (run_dir / "addenda", run_dir, "addenda directory"),
+        (run_dir / "subagents", run_dir, "subagents directory"),
+        (run_dir / "router-prompts", run_dir, "router-prompts directory"),
+        (evidence_dir, run_dir, "evidence directory"),
+    ]
+    checks.extend(
+        (evidence_dir / subdirectory, evidence_dir, f"evidence/{subdirectory} directory")
+        for subdirectory in EVIDENCE_SUBDIRECTORIES
+    )
+    for path, parent, label in checks:
+        if is_link_or_reparse_point(path):
+            return f"{label} must be a real directory and cannot be a symlink or reparse point."
+        if path.exists() and not path.is_dir():
+            return f"{label} must be a real directory and cannot be a symlink or reparse point."
+        if not is_within(path.resolve(), parent.resolve()):
+            return f"{label} must remain within its canonical parent directory."
+    return None
+
+
+def phase_zero_path_error(paths: tuple[Path, ...]) -> str | None:
+    for path in paths:
+        if is_link_or_reparse_point(path):
+            return f"target {path.name} must be a regular file and cannot be a symlink or reparse point."
+        if not path.exists():
+            continue
+        if not path.is_file():
+            return f"target {path.name} must be a regular file and cannot be a symlink or reparse point."
+        try:
+            link_count = path.stat().st_nlink
+        except OSError as exc:
+            return f"target {path.name} could not be validated safely: {exc}."
+        if link_count != 1:
+            return f"target {path.name} must not have multiple hard links."
+    return None
+
+
 def load_lint_module():
     module_path = Path(__file__).with_name("lint-recursive-run.py")
     spec = importlib.util.spec_from_file_location("recursive_mode_lint", module_path)
@@ -38,6 +108,31 @@ def load_lint_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def force_replacement_error(paths: tuple[Path, ...]) -> str | None:
+    lint = load_lint_module()
+    for path in paths:
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")
+        status_fields = re.findall(r"(?m)^[ \t]*(?:[-*][ \t]+)?Status:[ \t]*(.+?)\s*$", content)
+        if len(status_fields) != 1:
+            return f"--force target {path.name} must contain exactly one Status field; found {len(status_fields)}."
+        status = lint.get_md_field_value(content, "Status")
+        if status == "DRAFT":
+            continue
+        if status == "LOCKED":
+            return (
+                f"--force may replace only DRAFT scaffolds; {path.name} is LOCKED. "
+                "Reopen it with recursive-lock --reopen before regenerating the scaffold."
+            )
+        rendered_status = status or "missing"
+        return (
+            f"--force may replace only DRAFT scaffolds; {path.name} has Status: {rendered_status}. "
+            "Repair the artifact status before regenerating the scaffold."
+        )
+    return None
 
 
 def run_git(repo_root: Path, *args: str) -> tuple[str | None, str | None]:
@@ -299,11 +394,33 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Overwrite existing 00-requirements.md.")
     args = parser.parse_args()
 
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        print("[FAIL] Run ID must be a canonical kebab-case directory name.")
+        return 1
+
     repo_root = Path(args.repo_root).resolve()
     print(f"[INFO] Repo root: {repo_root}")
 
     run_root = repo_root / ".recursive" / "run"
     run_dir = run_root / args.run_id
+    requirements_path = run_dir / "00-requirements.md"
+    worktree_path = run_dir / "00-worktree.md"
+
+    directory_error = run_directory_error(repo_root, run_root, run_dir)
+    if directory_error:
+        print(f"[FAIL] {directory_error}")
+        return 1
+
+    path_error = phase_zero_path_error((requirements_path, worktree_path))
+    if path_error:
+        print(f"[FAIL] {path_error}")
+        return 1
+
+    if args.force:
+        replacement_error = force_replacement_error((requirements_path, worktree_path))
+        if replacement_error:
+            print(f"[FAIL] {replacement_error}")
+            return 1
 
     ensure_directory(run_root)
     ensure_directory(run_dir)
@@ -316,7 +433,6 @@ def main() -> None:
     for sub in EVIDENCE_SUBDIRECTORIES:
         ensure_directory(evidence_dir / sub)
 
-    requirements_path = run_dir / "00-requirements.md"
     if requirements_path.exists() and not args.force:
         print(f"[INFO] Requirements file exists, not overwriting: {requirements_path}")
     else:
@@ -327,7 +443,6 @@ def main() -> None:
     if prefill_error:
         print(f"[WARN] {prefill_error}")
 
-    worktree_path = run_dir / "00-worktree.md"
     if worktree_path.exists() and not args.force:
         print(f"[INFO] Worktree file exists, not overwriting: {worktree_path}")
     else:

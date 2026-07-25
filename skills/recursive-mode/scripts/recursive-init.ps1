@@ -10,6 +10,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+if ($RunId -cnotmatch '\A[a-z0-9]+(?:-[a-z0-9]+)*\z') {
+    Write-Host "[FAIL] Run ID must be a canonical kebab-case directory name."
+    exit 1
+}
+
 function Write-Utf8NoBom {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -29,6 +34,117 @@ function Ensure-Directory {
     } else {
         Write-Host ("[OK] Directory exists: {0}" -f $Path)
     }
+}
+
+function Get-ResolvedOrFullPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (Test-Path -LiteralPath $Path) {
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+function Test-ContainedPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Parent
+    )
+
+    $resolvedPath = Get-ResolvedOrFullPath -Path $Path
+    $resolvedParent = Get-ResolvedOrFullPath -Path $Parent
+    $comparison = if ([System.IO.Path]::DirectorySeparatorChar -eq "\") {
+        [System.StringComparison]::OrdinalIgnoreCase
+    } else {
+        [System.StringComparison]::Ordinal
+    }
+    $parentPrefix = $resolvedParent.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ) + [System.IO.Path]::DirectorySeparatorChar
+    return $resolvedPath.StartsWith($parentPrefix, $comparison)
+}
+
+function Test-RunDirectories {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$RunDir
+    )
+
+    $recursiveRoot = Join-Path $RepoRoot ".recursive"
+    $evidenceDir = Join-Path $RunDir "evidence"
+    $checks = @(
+        @{ Path = $recursiveRoot; Parent = $RepoRoot; Label = ".recursive control directory" },
+        @{ Path = $RunRoot; Parent = $recursiveRoot; Label = "run root directory" },
+        @{ Path = $RunDir; Parent = $RunRoot; Label = "run directory" },
+        @{ Path = (Join-Path $RunDir "addenda"); Parent = $RunDir; Label = "addenda directory" },
+        @{ Path = (Join-Path $RunDir "subagents"); Parent = $RunDir; Label = "subagents directory" },
+        @{ Path = (Join-Path $RunDir "router-prompts"); Parent = $RunDir; Label = "router-prompts directory" },
+        @{ Path = $evidenceDir; Parent = $RunDir; Label = "evidence directory" },
+        @{ Path = (Join-Path $evidenceDir "screenshots"); Parent = $evidenceDir; Label = "evidence/screenshots directory" },
+        @{ Path = (Join-Path $evidenceDir "logs"); Parent = $evidenceDir; Label = "evidence/logs directory" },
+        @{ Path = (Join-Path $evidenceDir "perf"); Parent = $evidenceDir; Label = "evidence/perf directory" },
+        @{ Path = (Join-Path $evidenceDir "traces"); Parent = $evidenceDir; Label = "evidence/traces directory" },
+        @{ Path = (Join-Path $evidenceDir "reviews"); Parent = $evidenceDir; Label = "evidence/reviews directory" },
+        @{ Path = (Join-Path $evidenceDir "review-bundles"); Parent = $evidenceDir; Label = "evidence/review-bundles directory" },
+        @{ Path = (Join-Path $evidenceDir "router"); Parent = $evidenceDir; Label = "evidence/router directory" },
+        @{ Path = (Join-Path $evidenceDir "other"); Parent = $evidenceDir; Label = "evidence/other directory" }
+    )
+    foreach ($check in $checks) {
+        $item = Get-Item -LiteralPath $check.Path -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item) {
+            $isReparsePoint = (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+            if ($isReparsePoint -or (-not $item.PSIsContainer)) {
+                Write-Host ("[FAIL] {0} must be a real directory and cannot be a symlink or reparse point." -f $check.Label)
+                return $false
+            }
+        }
+        if (-not (Test-ContainedPath -Path $check.Path -Parent $check.Parent)) {
+            Write-Host ("[FAIL] {0} must remain within its canonical parent directory." -f $check.Label)
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-PhaseZeroTargets {
+    param([Parameter(Mandatory = $true)][string[]]$Paths)
+
+    foreach ($path in $Paths) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        $isReparsePoint = (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+        if ($isReparsePoint) {
+            Write-Host (
+                "[FAIL] target {0} must be a regular file and cannot be a symlink or reparse point." -f
+                ([System.IO.Path]::GetFileName($path))
+            )
+            return $false
+        }
+        $unixStatProperty = $item.PSObject.Properties["UnixStat"]
+        $isUnixRegularFile = ($null -eq $unixStatProperty) -or ($item.UnixStat.ItemType -eq "File")
+        if ($item.PSIsContainer -or (-not (Test-Path -LiteralPath $path -PathType Leaf)) -or (-not $isUnixRegularFile)) {
+            Write-Host (
+                "[FAIL] target {0} must be a regular file; directories and special files are not allowed." -f
+                ([System.IO.Path]::GetFileName($path))
+            )
+            return $false
+        }
+        $linkTypeProperty = $item.PSObject.Properties["LinkType"]
+        $isHardLink = ($null -ne $linkTypeProperty) -and ($item.LinkType -eq "HardLink")
+        $hasMultipleUnixLinks = ($null -ne $unixStatProperty) -and ($item.UnixStat.HardlinkCount -gt 1)
+        if ($isHardLink -or $hasMultipleUnixLinks) {
+            Write-Host (
+                "[FAIL] target {0} must not have multiple hard links." -f
+                ([System.IO.Path]::GetFileName($path))
+            )
+            return $false
+        }
+    }
+    return $true
 }
 
 function Run-Git {
@@ -63,6 +179,44 @@ function Get-MdFieldValue {
         return $null
     }
     return ($match.Groups[1].Value.Trim() -replace '^[`"'']+|[`"'']+$', "")
+}
+
+function Test-ForceReplacement {
+    param([Parameter(Mandatory = $true)][string[]]$Paths)
+
+    foreach ($path in $Paths) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        $content = Get-Content -LiteralPath $path -Raw
+        $statusFields = [regex]::Matches($content, "(?m)^[ \t]*(?:[-*][ \t]+)?Status:[ \t]*(.+?)\s*$")
+        if ($statusFields.Count -ne 1) {
+            Write-Host (
+                "[FAIL] --force target {0} must contain exactly one Status field; found {1}." -f
+                ([System.IO.Path]::GetFileName($path)), $statusFields.Count
+            )
+            return $false
+        }
+        $status = Get-MdFieldValue -Content $content -FieldName "Status"
+        if ($status -ceq "DRAFT") {
+            continue
+        }
+        if ($status -ceq "LOCKED") {
+            Write-Host ((
+                "[FAIL] --force may replace only DRAFT scaffolds; {0} is LOCKED. " +
+                "Reopen it with recursive-lock --reopen before regenerating the scaffold."
+            ) -f ([System.IO.Path]::GetFileName($path)))
+            return $false
+        }
+        $renderedStatus = if ([string]::IsNullOrWhiteSpace($status)) { "missing" } else { $status }
+        Write-Host ((
+            "[FAIL] --force may replace only DRAFT scaffolds; {0} has Status: {1}. " +
+            "Repair the artifact status before regenerating the scaffold."
+        ) -f ([System.IO.Path]::GetFileName($path)), $renderedStatus)
+        return $false
+    }
+    return $true
 }
 
 function Normalize-BaselineType {
@@ -452,11 +606,30 @@ function Invoke-TrainingLoader {
     return $true
 }
 
-$resolvedRepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
+$repoRootFullPath = [System.IO.Path]::GetFullPath($RepoRoot)
+$resolvedRepoRoot = if (Test-Path -LiteralPath $repoRootFullPath) {
+    (Resolve-Path -LiteralPath $repoRootFullPath).Path
+} else {
+    $repoRootFullPath
+}
 Write-Host ("[INFO] Repo root: {0}" -f $resolvedRepoRoot)
 
 $runRoot = Join-Path $resolvedRepoRoot ".recursive/run"
 $runDir = Join-Path $runRoot $RunId
+$requirementsPath = Join-Path $runDir "00-requirements.md"
+$worktreePath = Join-Path $runDir "00-worktree.md"
+
+if (-not (Test-RunDirectories -RepoRoot $resolvedRepoRoot -RunRoot $runRoot -RunDir $runDir)) {
+    exit 1
+}
+
+if (-not (Test-PhaseZeroTargets -Paths @($requirementsPath, $worktreePath))) {
+    exit 1
+}
+
+if ($Force -and (-not (Test-ForceReplacement -Paths @($requirementsPath, $worktreePath)))) {
+    exit 1
+}
 
 Ensure-Directory -Path $runRoot
 Ensure-Directory -Path $runDir
@@ -475,7 +648,6 @@ Ensure-Directory -Path (Join-Path $evidenceDir "review-bundles")
 Ensure-Directory -Path (Join-Path $evidenceDir "router")
 Ensure-Directory -Path (Join-Path $evidenceDir "other")
 
-$requirementsPath = Join-Path $runDir "00-requirements.md"
 if ((Test-Path -LiteralPath $requirementsPath) -and (-not $Force)) {
     Write-Host ("[INFO] Requirements file exists, not overwriting: {0}" -f $requirementsPath)
 } else {
@@ -489,7 +661,6 @@ if ($gitContextResult.Error) {
     Write-Host ("[WARN] {0}" -f $gitContextResult.Error)
 }
 
-$worktreePath = Join-Path $runDir "00-worktree.md"
 if ((Test-Path -LiteralPath $worktreePath) -and (-not $Force)) {
     Write-Host ("[INFO] Worktree file exists, not overwriting: {0}" -f $worktreePath)
 } else {
