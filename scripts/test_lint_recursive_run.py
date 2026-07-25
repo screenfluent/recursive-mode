@@ -10,13 +10,23 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).with_name("lint-recursive-run.py")
+RUNTIME = Path(__file__).resolve().parent.parent / "skills" / "recursive-mode" / "scripts"
+sys.path.insert(0, str(RUNTIME))
+MODULE_PATH = RUNTIME / "lint-recursive-run.py"
 SPEC = importlib.util.spec_from_file_location("lint_recursive_run", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Unable to load lint module from {MODULE_PATH}")
 lint = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = lint
 SPEC.loader.exec_module(lint)
+
+CLOSEOUT_PATH = RUNTIME / "recursive-closeout.py"
+CLOSEOUT_SPEC = importlib.util.spec_from_file_location("recursive_closeout", CLOSEOUT_PATH)
+if CLOSEOUT_SPEC is None or CLOSEOUT_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load closeout module from {CLOSEOUT_PATH}")
+closeout = importlib.util.module_from_spec(CLOSEOUT_SPEC)
+sys.modules[CLOSEOUT_SPEC.name] = closeout
+CLOSEOUT_SPEC.loader.exec_module(closeout)
 
 
 class LintRecursiveRunTests(unittest.TestCase):
@@ -90,13 +100,31 @@ class LintRecursiveRunTests(unittest.TestCase):
         self.assertEqual([".worktrees/benchmark-test-run/src/lib.rs"], filtered)
 
     def test_requirements_artifact_no_longer_requires_assumptions_section(self) -> None:
-        sections = lint.get_artifact_required_sections("00-requirements.md", "recursive-mode-audit-v2")
+        sections = lint.get_artifact_required_sections("00-requirements.md")
 
         self.assertNotIn("Assumptions", sections)
         self.assertEqual(
             ["TODO", "Requirements", "Out of Scope", "Constraints", "Coverage Gate", "Approval Gate"],
             sections,
         )
+
+    def test_closeout_scaffold_requires_real_capability_decision(self) -> None:
+        audit_context = closeout.default_audit_context("04-test-summary.md", [".recursive/run/demo/03.5-code-review.md"])
+        content = f"## Audit Context\n\n{audit_context}\n"
+
+        issues = lint.lint_audit_sections(
+            Path("04-test-summary.md"),
+            content,
+            actual_changed_files=None,
+            diff_basis_error=None,
+            run_id="demo",
+            run_dir=Path(".recursive/run/demo"),
+        )
+
+        self.assertIn("Audit Context is missing a valid Audit Execution Mode: subagent|self-audit", issues)
+        self.assertIn("Audit Context is missing a valid Subagent Availability: available|unavailable", issues)
+        self.assertIn("Audit Context is missing Subagent Capability Probe", issues)
+        self.assertIn("Audit Context is missing Delegation Decision Basis", issues)
 
 if __name__ == "__main__":
     unittest.main()

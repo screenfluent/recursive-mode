@@ -210,7 +210,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertIn(f"Run: `/.recursive/run/{self.run_id}/`", content)
         self.assertIn("Phase: `00 Requirements`", content)
         self.assertIn("Status: `LOCKED`", content)
-        self.assertIn("Workflow version: `recursive-mode-audit-v2`", content)
+        self.assertNotIn("Workflow version:", content)
         self.assertIn("## TODO", content)
         self.assertIn("## Requirements", content)
         self.assertIn("## Out of Scope", content)
@@ -218,7 +218,12 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertNotIn("## Assumptions", content)
         self.assertIn("Coverage: PASS", content)
         self.assertIn("Approval: PASS", content)
-        self.assertRegex(content, r"LockHash: `[0-9a-f]{64}`")
+        lock_hash = re.search(r"LockHash: `([0-9a-f]{64})`", content)
+        self.assertIsNotNone(lock_hash)
+        self.assertEqual(
+            rrb.lock_hash_from_content(content.rstrip() + "\n"),
+            lock_hash.group(1),
+        )
         self.assertIn("### `R7` Quality gates", content)
 
     def test_seeded_recursive_templates_include_phase2_and_repo_root_relative_worktree_examples(self) -> None:
@@ -235,12 +240,59 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertIn("Implementation Surface:", templates["02-to-be-plan.md"])
         self.assertIn("Verification Surface:", templates["02-to-be-plan.md"])
         self.assertIn("QA Surface:", templates["02-to-be-plan.md"])
+        self.assertIn("## Test Surface", templates["02-to-be-plan.md"])
+        test_surface_rows = [
+            line
+            for line in templates["02-to-be-plan.md"].splitlines()
+            if line.startswith("- TS-")
+        ]
+        expected_criteria = [
+            (spec.requirement_id, criterion)
+            for spec in self.harness.benchmark_requirement_specs()
+            for criterion in spec.acceptance_criteria
+        ]
+        self.assertEqual(len(expected_criteria), len(test_surface_rows))
+        for requirement_id, criterion in expected_criteria:
+            self.assertTrue(
+                any(
+                    f"Requirement: {requirement_id} | Behavior: {criterion} |" in row
+                    for row in test_surface_rows
+                ),
+                f"missing criterion-level Test Surface for {requirement_id}: {criterion}",
+            )
+        self.assertTrue(
+            any(
+                "Behavior: Calculator state or recent history persists in browser-local storage across reloads."
+                in row
+                and "Seam: browser reload boundary and browser-local persisted state" in row
+                for row in test_surface_rows
+            )
+        )
+        self.assertTrue(
+            any(
+                "Behavior: `cargo test` succeeds." in row
+                and "Seam: command boundary: `cargo test`" in row
+                for row in test_surface_rows
+            )
+        )
+        self.assertTrue(
+            any(
+                "Behavior: The implementation includes meaningful automated tests for expression evaluation, "
+                "scientific-function correctness, angle-mode behavior, and at least one error case."
+                in row
+                and "Seam: command boundary: `cargo test`" in row
+                for row in test_surface_rows
+            )
+        )
+        self.assertFalse(any("public product behavior under" in row for row in test_surface_rows))
+        self.assertIn("## Review Metadata", templates["03-implementation-summary.md"])
         self.assertIn(f".worktrees/{self.run_id}/src/main.rs", templates["02-to-be-plan.md"])
-        self.assertIn("Audit: FAIL", templates["03-implementation-summary.md"])
+        self.assertNotIn("## Gaps Found", templates["03-implementation-summary.md"])
+        self.assertNotIn("## Repair Work Performed", templates["03-implementation-summary.md"])
+        self.assertNotIn("## Audit Verdict", templates["03-implementation-summary.md"])
         self.assertIn("TDD Compliance: FAIL", templates["03-implementation-summary.md"])
         self.assertIn(f".recursive/run/{self.run_id}/evidence/screenshots/replace-me.png", templates["02-to-be-plan.md"])
         self.assertIn("None because", templates["01-as-is.md"])
-        self.assertIn("Keep `Gaps Found` limited to real audit defects", templates["01-as-is.md"])
         self.assertIn("Prefer file-only screenshot capture", templates["04-test-summary.md"])
         self.assertIn(f"`{'a' * 40}`", templates["00-worktree.md"])
 
@@ -397,13 +449,32 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             "scripts/recursive-router-invoke.py",
             "scripts/recursive-router-invoke.ps1",
             "scripts/recursive_router_lib.py",
+            "scripts/recursive_phase_rules.py",
+            "scripts/recursive_review_action.py",
+            "scripts/recursive_review_ledger.py",
+            "scripts/recursive_review_surface.py",
         ]
         for relative_path in expected_scripts:
             with self.subTest(path=relative_path):
                 target_path = prepared_repo / Path(relative_path)
-                source_path = Path(rrb.__file__).resolve().parent / Path(relative_path).name
+                source_path = self.harness.runtime_dir / Path(relative_path).name
                 self.assertTrue(target_path.exists(), f"Expected helper script to exist: {relative_path}")
                 self.assertEqual(source_path.read_text(encoding="utf-8"), target_path.read_text(encoding="utf-8"))
+        for helper_name in (
+            "recursive-review-bundle.py",
+            "recursive-subagent-action.py",
+            "lint-recursive-run.py",
+            "verify-locks.py",
+        ):
+            with self.subTest(importable=helper_name):
+                help_result = subprocess.run(
+                    [sys.executable, str(prepared_repo / "scripts" / helper_name), "--help"],
+                    cwd=prepared_repo,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(0, help_result.returncode, help_result.stdout + help_result.stderr)
 
     def test_recursive_on_prompt_calls_out_lint_critical_headings_and_closeout_receipts(self) -> None:
         prompt_text, _ = self.harness.render_prompt(self.workspace_root / "prompts", self._make_result())
@@ -563,7 +634,14 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertIn("benchmark/recursive-stage-routing.md", prompt_text)
         self.assertIn("benchmark/recursive-skills/recursive-subagent/SKILL.md", prompt_text)
         self.assertIn("Controller-coordinated routed stage plan for this run:", prompt_text)
-        self.assertIn("Review Bundle Path:", prompt_text)
+        self.assertIn(
+            f"Review Bundle Path: `/.recursive/run/{result.run_id}/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`",
+            prompt_text,
+        )
+        self.assertIn(
+            f"Review Ledger Path: `/.recursive/run/{result.run_id}/evidence/reviews/<phase-key>/<review-id>/ledger.md`",
+            prompt_text,
+        )
         self.assertIn(
             "Phase 1 / `01-as-is.md`: `analyst` -> `codex` (`gpt-5.4-mini`)",
             prompt_text,
@@ -985,7 +1063,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertNotIn('model = "kimi-code/kimi-for-coding"', updated)
         self.assertIn("temperature = 0.6", updated)
 
-    def test_maybe_repair_recursive_run_prompts_for_missing_artifacts_and_none_gaps(self) -> None:
+    def test_maybe_repair_recursive_run_prompts_for_missing_artifacts_and_lossless_review(self) -> None:
         logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
         logs_root.mkdir(parents=True, exist_ok=True)
         self._write(
@@ -993,11 +1071,9 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             "\n".join(
                 [
                     "Linting run: benchmark-test-run",
-                    "[FAIL] 01-as-is.md: Audit: PASS is invalid while Gaps Found still lists unresolved in-scope gaps",
+                    "[FAIL] 01-as-is.md: Recursive review: phase ledger must reach whole-ledger PASS before closure",
                     "[WARN] Missing artifact (ok if not reached yet): .recursive/run/benchmark-test-run/03-implementation-summary.md",
                     "[WARN] Missing artifact (ok if not reached yet): .recursive/run/benchmark-test-run/05-manual-qa.md",
-                    "## Gaps Found",
-                    "- No gaps",
                 ]
             ),
         )
@@ -1046,7 +1122,6 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
 
         self.harness.run_model_prompt = fake_run_model_prompt  # type: ignore[method-assign]
         self.harness.evaluate_recursive_run = fake_evaluate_recursive_run  # type: ignore[method-assign]
-        self.harness.reconcile_recursive_closeout_artifacts = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
 
         repair_record = self.harness.maybe_repair_recursive_run(
             self.repo_root,
@@ -1059,8 +1134,9 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         prompt_text = captured["prompt"]
         self.assertIn("03-implementation-summary.md", prompt_text)
         self.assertIn("05-manual-qa.md", prompt_text)
-        self.assertIn("Use the exact word `None`", prompt_text)
-        self.assertIn("No gaps", prompt_text)
+        self.assertIn("Review Ledger Path", prompt_text)
+        self.assertIn("Review Bundle Path", prompt_text)
+        self.assertIn("whole-ledger PASS", prompt_text)
         self.assertIn("`Compensating validation:` field", prompt_text)
         self.assertTrue(captured["reevaluated"])
         self.assertEqual("complete", result.recursive_workflow_status)
@@ -1174,47 +1250,6 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             prompt_text,
         )
 
-    def test_reconcile_recursive_requirement_changed_files_trims_out_of_diff_paths(self) -> None:
-        self._write(self.worktree_root / "src" / "main.rs", "fn main() {}\n")
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        artifact_body = "\n".join(
-            [
-                "## Requirement Completion Status",
-                "",
-                f"- R7 | Status: verified | Changed Files: `.worktrees/{self.run_id}/src/main.rs`, `.recursive/DECISIONS.md`, `.worktrees/{self.run_id}/.codex/AGENTS.md` | Verification Evidence: `.recursive/run/{self.run_id}/evidence/logs/green/r7.log`",
-            ]
-        )
-        for artifact_name in (
-            "03-implementation-summary.md",
-            "04-test-summary.md",
-            "06-decisions-update.md",
-            "07-state-update.md",
-            "08-memory-impact.md",
-        ):
-            self._write(run_root / artifact_name, artifact_body)
-
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        result = self._make_result()
-        self.harness.prepare_recursive_lint_root(self.repo_root, self.worktree_root, logs_root, result)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 03-implementation-summary.md: Requirement R7 Changed Files are outside the current diff scope: .recursive/DECISIONS.md, .worktrees/benchmark-test-run/.codex/AGENTS.md",
-                ]
-            ),
-        )
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_requirement_changed_files(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "08-memory-impact.md").read_text(encoding="utf-8")
-        self.assertIn(f"`.worktrees/{self.run_id}/src/main.rs`", updated)
-        self.assertNotIn("`.recursive/DECISIONS.md`", updated)
-        self.assertNotIn(f"`.worktrees/{self.run_id}/.codex/AGENTS.md`", updated)
 
     def test_optional_missing_artifact_warnings_are_tolerated_for_recursive_lint(self) -> None:
         logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
@@ -1235,731 +1270,12 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
 
         self.assertTrue(tolerated)
 
-    def test_reconcile_pragmatic_tdd_exception_adds_compensating_validation_field(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "03-implementation-summary.md",
-            "\n".join(
-                [
-                    "## TDD Compliance Log",
-                    "",
-                    "- TDD Mode: pragmatic",
-                    "TDD Compliance: PASS",
-                    "",
-                    "## Pragmatic TDD Exception",
-                    "",
-                    "- Exception reason: Blank starter",
-                    "",
-                    "### Compensating validation",
-                    "",
-                    f"- `.recursive/run/{self.run_id}/evidence/logs/green/sp1.log`",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 03-implementation-summary.md: Pragmatic TDD Exception is missing Compensating validation",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
 
-        changed = self.harness.reconcile_pragmatic_tdd_exception_field(self.repo_root, logs_root, result)
 
-        self.assertTrue(changed)
-        updated = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn(f"- Compensating validation: See `.recursive/run/{self.run_id}/evidence/logs/green/build.log`", updated)
-        self.assertIn("### Compensating validation", updated)
 
-    def test_reconcile_pragmatic_tdd_exception_adds_inline_value_when_field_is_blank(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "03-implementation-summary.md",
-            "\n".join(
-                [
-                    "## Pragmatic TDD Exception",
-                    "",
-                    "- Exception reason: Blank starter",
-                    "- Compensating validation:",
-                    f"  - `.recursive/run/{self.run_id}/evidence/logs/green/sp1.log`",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 03-implementation-summary.md: Pragmatic TDD Exception is missing Compensating validation",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
 
-        changed = self.harness.reconcile_pragmatic_tdd_exception_field(self.repo_root, logs_root, result)
 
-        self.assertTrue(changed)
-        updated = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn(f"See `.recursive/run/{self.run_id}/evidence/logs/green/build.log`", updated)
 
-    def test_reconcile_pragmatic_tdd_exception_section_restores_missing_heading(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "03-implementation-summary.md",
-            "\n".join(
-                [
-                    "## TDD Compliance Log",
-                    "",
-                    "- TDD Mode: pragmatic",
-                    "- Exception reason: Blank starter",
-                    f"- Compensating validation: `.recursive/run/{self.run_id}/evidence/logs/green/sp1.log`",
-                    "",
-                    "## Plan Deviations",
-                    "",
-                    "- None.",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 03-implementation-summary.md: TDD Mode pragmatic requires ## Pragmatic TDD Exception",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_pragmatic_tdd_exception_section(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn("## Pragmatic TDD Exception", updated)
-        self.assertIn("- Exception reason: Blank starter", updated)
-        self.assertIn(f"- Compensating validation: `.recursive/run/{self.run_id}/evidence/logs/green/sp1.log`", updated)
-
-    def test_reconcile_recursive_requirement_evidence_normalizes_bare_run_artifact_paths(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(run_root / "04-test-summary.md", "## Test Summary\n")
-        self._write(run_root / "05-manual-qa.md", "## Manual QA\n")
-        self._write(
-            run_root / "06-decisions-update.md",
-            "\n".join(
-                [
-                    "## Requirement Completion Status",
-                    "",
-                    (
-                        f"- R1 | Status: verified | Changed Files: `.worktrees/{self.run_id}/src/app.rs` | "
-                        "Implementation Evidence: `benchmark/agent-log.md` | "
-                        "Verification Evidence: `04-test-summary.md`, `05-manual-qa.md`"
-                    ),
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 06-decisions-update.md: Requirement R1 Implementation Evidence must reference the changed files or a current-run artifact that proves the implementation work",
-                    "[FAIL] 06-decisions-update.md: Requirement R1 Verification Evidence path(s) do not exist: 04-test-summary.md, 05-manual-qa.md",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_requirement_evidence(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "06-decisions-update.md").read_text(encoding="utf-8")
-        self.assertIn(f"Implementation Evidence: `.worktrees/{self.run_id}/src/app.rs`, `benchmark/agent-log.md`", updated)
-        self.assertIn(f"Verification Evidence: `.recursive/run/{self.run_id}/04-test-summary.md`, `.recursive/run/{self.run_id}/05-manual-qa.md`", updated)
-
-    def test_reconcile_recursive_requirement_evidence_replaces_duplicate_verification_evidence(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(run_root / "04-test-summary.md", "## Test Summary\n")
-        self._write(run_root / "05-manual-qa.md", "## Manual QA\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "test.log", "tests\n")
-        self._write(
-            run_root / "06-decisions-update.md",
-            "\n".join(
-                [
-                    "## Requirement Completion Status",
-                    "",
-                    (
-                        f"- R1 | Status: verified | Changed Files: `.worktrees/{self.run_id}/src/app.rs` | "
-                        f"Implementation Evidence: `.recursive/run/{self.run_id}/evidence/logs/green/test.log` | "
-                        f"Verification Evidence: `.recursive/run/{self.run_id}/evidence/logs/green/test.log`"
-                    ),
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 06-decisions-update.md: Requirement R1 Verification Evidence cannot be satisfied by restating only the implementation evidence",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_requirement_evidence(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "06-decisions-update.md").read_text(encoding="utf-8")
-        self.assertIn(f"Verification Evidence: `.recursive/run/{self.run_id}/04-test-summary.md`, `.recursive/run/{self.run_id}/05-manual-qa.md`", updated)
-
-    def test_reconcile_recursive_requirement_evidence_updates_phase3_implementation_evidence(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(self.worktree_root / "src" / "App.test.tsx", "test file\n")
-        self._write(
-            run_root / "03-implementation-summary.md",
-            "\n".join(
-                [
-                    "## Requirement Completion Status",
-                    "",
-                    (
-                        f"- R1 | Status: implemented | Changed Files: `.worktrees/{self.run_id}/src/app.rs` | "
-                        f"Implementation Evidence: `.worktrees/{self.run_id}/src/App.test.tsx`"
-                    ),
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 03-implementation-summary.md: Requirement R1 Implementation Evidence must reference the changed files or a current-run artifact that proves the implementation work",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_requirement_evidence(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn(f"Implementation Evidence: `.worktrees/{self.run_id}/src/app.rs`, `.worktrees/{self.run_id}/src/App.test.tsx`", updated)
-
-    def test_reconcile_recursive_requirement_changed_files_backfills_unaccounted_product_paths(self) -> None:
-        self._write(self.worktree_root / "src" / "main.rs", "fn main() {}\n")
-        self._write(self.worktree_root / "src" / "types.ts", "export type WorkItem = { id: string };\n")
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "03-implementation-summary.md",
-            "\n".join(
-                [
-                    "## Requirement Completion Status",
-                    "",
-                    f"- R1 | Status: implemented | Changed Files: `.worktrees/{self.run_id}/src/main.rs`",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        result = self._make_result()
-        self.harness.is_product_path = lambda _: True  # type: ignore[method-assign]
-        self.harness.current_recursive_lint_diff_paths = lambda _: {  # type: ignore[method-assign]
-            f".worktrees/{self.run_id}/src/main.rs",
-            f".worktrees/{self.run_id}/src/types.ts",
-        }
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    f"[FAIL] 03-implementation-summary.md: Requirement Completion Status leaves diff-owned changed file(s) unaccounted for: .worktrees/{self.run_id}/src/types.ts",
-                ]
-            ),
-        )
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_requirement_changed_files(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn(f"`.worktrees/{self.run_id}/src/types.ts`", updated)
-
-    def test_reconcile_recursive_diff_audit_expands_changed_paths(self) -> None:
-        self._write(self.worktree_root / "src" / "main.rs", "fn main() {}\n")
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "04-test-summary.md",
-            "\n".join(
-                [
-                    "## Worktree Diff Audit",
-                    "",
-                    "- Reviewed paths: Same as Phase 3 - 1 file changed in worktree.",
-                    "- Unexplained drift: none",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        result = self._make_result()
-        self.harness.current_recursive_lint_diff_paths = lambda _: {  # type: ignore[method-assign]
-            f".worktrees/{self.run_id}/src/main.rs",
-        }
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 04-test-summary.md: Worktree Diff Audit does not account for actual changed files from git diff: .worktrees/benchmark-test-run/src/main.rs",
-                ]
-            ),
-        )
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_diff_audit(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "04-test-summary.md").read_text(encoding="utf-8")
-        self.assertIn("- Actual changed files reviewed:", updated)
-        self.assertIn(f"  - `.worktrees/{self.run_id}/src/main.rs`", updated)
-
-    def test_reconcile_recursive_phase1_requirement_statuses_normalizes_partial(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "01-as-is.md",
-            "\n".join(
-                [
-                    "## Requirement Completion Status",
-                    "",
-                    f"- R5 | Status: partial | Rationale: Starter UX is incomplete. | Blocking Evidence: `.worktrees/{self.run_id}/src/App.tsx` | Audit Note: Baseline only.",
-                    f"- R6 | Status: partial | Rationale: Build/test are incomplete quality gates. | Blocking Evidence: `.recursive/run/{self.run_id}/evidence/logs/baseline/baseline-test.log` | Audit Note: Baseline only.",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 01-as-is.md: Requirement Completion Status for R5 has invalid Status 'partial'",
-                    "[FAIL] 01-as-is.md: Requirement Completion Status for R6 has invalid Status 'partial'",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_phase1_requirement_statuses(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "01-as-is.md").read_text(encoding="utf-8")
-        self.assertIn("| Status: blocked |", updated)
-        self.assertNotIn("| Status: partial |", updated)
-
-    def test_reconcile_recursive_phase1_requirement_statuses_downgrades_verified_baseline(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "01-as-is.md",
-            "\n".join(
-                [
-                    "## Requirement Completion Status",
-                    "",
-                    (
-                        f"- R6 | Status: verified | Rationale: Baseline build/test/preview pass. | "
-                        f"Blocking Evidence: `.recursive/run/{self.run_id}/evidence/logs/baseline/baseline-test.log` | "
-                        "Audit Note: Baseline only."
-                    ),
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 01-as-is.md: Requirement R6 with Status verified contains contradictory field(s): Blocking Evidence, Rationale",
-                    "[FAIL] 01-as-is.md: Requirement R6 with Status verified must cite Changed Files",
-                    "[FAIL] 01-as-is.md: Requirement R6 with Status verified must cite Implementation Evidence",
-                    "[FAIL] 01-as-is.md: Requirement R6 with Status verified must cite Verification Evidence",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_phase1_requirement_statuses(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "01-as-is.md").read_text(encoding="utf-8")
-        self.assertIn("- R6 | Status: blocked |", updated)
-        self.assertIn("Blocking Evidence: .recursive/run/benchmark-test-run/evidence/logs/baseline/baseline-test.log", updated)
-        self.assertNotIn("| Status: verified |", updated)
-        self.assertNotIn("Changed Files:", updated)
-        self.assertNotIn("Implementation Evidence:", updated)
-        self.assertNotIn("Verification Evidence:", updated)
-
-    def test_reconcile_recursive_phase2_mapping_preserves_source_quotes_and_heading(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "01-as-is.md",
-            "\n".join(
-                [
-                    "## Source Requirement Inventory",
-                    "",
-                    "- R1 | Source Quote: Description: Exact quoted requirement. | Summary: Summary | Disposition: in-scope",
-                ]
-            ),
-        )
-        self._write(
-            run_root / "02-to-be-plan.md",
-            "\n".join(
-                [
-                    "## Requirement Mapping",
-                    "",
-                    f"- R1 | Source Quote: Exact quoted requirement. | Coverage: direct | Implementation Surface: `.worktrees/{self.run_id}/src/App.tsx` | Verification Surface: `.worktrees/{self.run_id}/src/App.test.tsx` | QA Surface: `.recursive/run/{self.run_id}/evidence/screenshots/r1.png`",
-                    "",
-                    "## Playwright Plan",
-                    "",
-                    "- Not applicable.",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 02-to-be-plan.md: Missing required section heading: ## Playwright Plan (if applicable)",
-                    "[FAIL] 02-to-be-plan.md: Requirement Mapping for R1 must preserve the Source Quote recorded in Source Requirement Inventory",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_phase2_mapping(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "02-to-be-plan.md").read_text(encoding="utf-8")
-        self.assertIn("## Playwright Plan (if applicable)", updated)
-        self.assertIn("Source Quote: Description: Exact quoted requirement.", updated)
-
-    def test_reconcile_recursive_subagent_capability_probe_replaces_none(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "04-test-summary.md",
-            "\n".join(
-                [
-                    "## Audit Context",
-                    "",
-                    "- Audit Execution Mode: self-audit",
-                    "- Subagent Availability: unavailable",
-                    "- Subagent Capability Probe: none",
-                    "- Delegation Decision Basis: self-audit",
-                    "- Audit Inputs Provided:",
-                    "  - `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 04-test-summary.md: Audit Context is missing Subagent Capability Probe",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_subagent_capability_probe(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "04-test-summary.md").read_text(encoding="utf-8")
-        self.assertIn("Benchmark controller uses self-audit here because no durable delegated subagent facility is available", updated)
-
-    def test_reconcile_recursive_missing_header_fields_rewrites_controller_owned_artifacts(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(self.worktree_root / "src" / "App.tsx", "export function App() { return null; }\n")
-        self._write(self.worktree_root / "src" / "App.test.tsx", "test('planner', () => {})\n")
-        self._write(self.worktree_root / "src" / "styles.css", ".planner { display: grid; }\n")
-        self._write(run_root / "03-implementation-summary.md", "## Requirement Completion Status\n")
-        self._write(run_root / "04-test-summary.md", "## Requirement Completion Status\n")
-        self._write(run_root / "06-decisions-update.md", "## Requirement Completion Status\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "build.log", "build ok\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "test.log", "test ok\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "preview.log", "preview ok\n")
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 03-implementation-summary.md: Missing required header field(s): Run",
-                    "[FAIL] 04-test-summary.md: Missing required header field(s): Run",
-                    "[FAIL] 06-decisions-update.md: Missing required header field(s): Run",
-                ]
-            ),
-        )
-        self.harness.current_recursive_lint_diff_paths = lambda _: {  # type: ignore[method-assign]
-            f".worktrees/{self.run_id}/src/App.tsx",
-            f".worktrees/{self.run_id}/src/App.test.tsx",
-            f".worktrees/{self.run_id}/src/styles.css",
-        }
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_recursive_missing_header_fields(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        self.assertIn(f"Run: `/.recursive/run/{self.run_id}/`", (run_root / "03-implementation-summary.md").read_text(encoding="utf-8"))
-        self.assertIn(f"Run: `/.recursive/run/{self.run_id}/`", (run_root / "04-test-summary.md").read_text(encoding="utf-8"))
-        self.assertIn(f"Run: `/.recursive/run/{self.run_id}/`", (run_root / "06-decisions-update.md").read_text(encoding="utf-8"))
-
-    def test_benchmark_requirement_surfaces_filters_control_plane_paths(self) -> None:
-        args = argparse.Namespace(
-            scenario="local-first-planner",
-            runner="codex",
-            workspace_root=str(self.workspace_root / "local-first"),
-            copilot_model="gpt-5.4",
-            codex_model="gpt-5.4",
-            kimi_model="kimi-k2.6",
-            opencode_model="opencode/gpt-5-nano",
-            max_minutes=5,
-            command_timeout=120,
-            preview_timeout=30,
-            npm_command="npm",
-            arm_mode="sequential",
-            hint_penalty=5.0,
-            prepare_only=False,
-            skip_npm_install=True,
-            list_scenarios=False,
-        )
-        harness = rrb.BenchmarkHarness(args)
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(self.worktree_root / "src" / "App.tsx", "export function App() { return null; }\n")
-        self._write(
-            run_root / "02-to-be-plan.md",
-            "\n".join(
-                [
-                    "## Requirement Mapping",
-                    f"- Requirement ID: R1 | Implementation Surface: `.recursive/run/{self.run_id}/00-worktree.md`, `.worktrees/{self.run_id}/src/App.tsx`",
-                ]
-            ),
-        )
-
-        surfaces = harness.benchmark_requirement_surfaces(
-            self.repo_root,
-            self._make_result(),
-            {f".worktrees/{self.run_id}/src/App.tsx"},
-        )
-
-        self.assertEqual(surfaces["R1"], [f".worktrees/{self.run_id}/src/App.tsx"])
-        self.assertEqual(surfaces["R2"], [f".worktrees/{self.run_id}/src/App.tsx"])
-        self.assertEqual(surfaces["R3"], [f".worktrees/{self.run_id}/src/App.tsx"])
-        self.assertEqual(surfaces["R4"], [f".worktrees/{self.run_id}/src/App.tsx"])
-
-    def test_requirement_changed_files_ignores_non_product_diff_when_worktree_has_no_product_changes(self) -> None:
-        result = self._make_result()
-
-        grouped = self.harness.requirement_changed_files_by_id(
-            self.repo_root,
-            result,
-            {
-                "benchmark/agent-log.md",
-                "benchmark/benchmark-context.json",
-                "benchmark/expected-product-root.txt",
-            },
-        )
-
-        for requirement_id in ("R1", "R2", "R3", "R4", "R5", "R6", "R7"):
-            self.assertEqual(grouped[requirement_id], [])
-
-    def test_reconcile_recursive_requirement_changed_files_rewrites_requirement_status_artifacts(self) -> None:
-        args = argparse.Namespace(
-            scenario="local-first-planner",
-            runner="codex",
-            workspace_root=str(self.workspace_root / "local-first-rewrite"),
-            copilot_model="gpt-5.4",
-            codex_model="gpt-5.4",
-            kimi_model="kimi-k2.6",
-            opencode_model="opencode/gpt-5-nano",
-            max_minutes=5,
-            command_timeout=120,
-            preview_timeout=30,
-            npm_command="npm",
-            arm_mode="sequential",
-            hint_penalty=5.0,
-            prepare_only=False,
-            skip_npm_install=True,
-            list_scenarios=False,
-        )
-        harness = rrb.BenchmarkHarness(args)
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(self.worktree_root / "src" / "App.tsx", "export function App() { return null; }\n")
-        self._write(self.worktree_root / "src" / "App.test.tsx", "test('planner', () => {})\n")
-        self._write(self.worktree_root / "src" / "styles.css", ".planner { display: grid; }\n")
-        self._write(self.worktree_root / "src" / "types.ts", "export type Planner = { id: string };\n")
-        self._write(self.worktree_root / "src" / "usePlanner.ts", "export const usePlanner = () => null;\n")
-        self._write(run_root / "03-implementation-summary.md", "## Requirement Completion Status\n- R2 | Status: implemented | Changed Files:  | Implementation Evidence: `a`\n")
-        self._write(run_root / "04-test-summary.md", "## Requirement Completion Status\n- R2 | Status: verified | Changed Files:  | Implementation Evidence: `a` | Verification Evidence: `b`\n")
-        self._write(run_root / "05-manual-qa.md", "Run: `/.recursive/run/benchmark-test-run/`\n")
-        self._write(run_root / "06-decisions-update.md", "## Requirement Completion Status\n- R2 | Status: verified | Changed Files:  | Implementation Evidence: `a` | Verification Evidence: `b`\n")
-        self._write(run_root / "07-state-update.md", "## Requirement Completion Status\n- R2 | Status: verified | Changed Files:  | Implementation Evidence: `a` | Verification Evidence: `b`\n")
-        self._write(run_root / "08-memory-impact.md", "## Requirement Completion Status\n- R2 | Status: verified | Changed Files:  | Implementation Evidence: `a` | Verification Evidence: `b`\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "build.log", "build ok\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "test.log", "test ok\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "preview.log", "preview ok\n")
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "[FAIL] 03-implementation-summary.md: Requirement R2 with Status implemented must cite Changed Files\n",
-        )
-        harness.current_recursive_lint_diff_paths = lambda _: {  # type: ignore[method-assign]
-            f".worktrees/{self.run_id}/src/App.tsx",
-            f".worktrees/{self.run_id}/src/App.test.tsx",
-            f".worktrees/{self.run_id}/src/styles.css",
-            f".worktrees/{self.run_id}/src/types.ts",
-            f".worktrees/{self.run_id}/src/usePlanner.ts",
-        }
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = harness.reconcile_recursive_requirement_changed_files(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn(f"- R2 | Status: implemented | Changed Files: `.worktrees/{self.run_id}/src/App.tsx`", updated)
-
-    def test_materialize_missing_recursive_closeout_artifacts_creates_phase2_to_phase8_receipts(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(self.worktree_root / "src" / "App.tsx", "export function App() { return null; }\n")
-        self._write(self.worktree_root / "src" / "App.test.tsx", "test('planner', () => {})\n")
-        self._write(self.worktree_root / "src" / "storage.ts", "export const load = () => null;\n")
-        self._write(self.worktree_root / "src" / "styles.css", ".planner { display: grid; }\n")
-        self._write(self.worktree_root / "src" / "types.ts", "export type WorkItem = { id: string };\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "build.log", "build ok\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "test.log", "test ok\n")
-        self._write(run_root / "evidence" / "logs" / "green" / "preview.log", "Preview URL: http://127.0.0.1:4173/\n")
-        self._write(run_root / "evidence" / "screenshots" / "01-empty-state.png", "png\n")
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        result = self._make_result()
-        result.recursive_workflow_status = "incomplete"
-        result.recursive_artifact_status = {name: True for name in rrb.REQUIRED_RECURSIVE_RUN_FILES}
-        for artifact_name in (
-            "02-to-be-plan.md",
-            "03-implementation-summary.md",
-            "04-test-summary.md",
-            "05-manual-qa.md",
-            "06-decisions-update.md",
-            "07-state-update.md",
-            "08-memory-impact.md",
-        ):
-            result.recursive_artifact_status[artifact_name] = False
-        self.harness.current_recursive_lint_diff_paths = lambda _: {  # type: ignore[method-assign]
-            f".worktrees/{self.run_id}/.gitignore",
-            f".worktrees/{self.run_id}/src/App.tsx",
-            f".worktrees/{self.run_id}/src/App.test.tsx",
-            f".worktrees/{self.run_id}/src/storage.ts",
-            f".worktrees/{self.run_id}/src/styles.css",
-            f".worktrees/{self.run_id}/src/types.ts",
-        }
-
-        changed = self.harness.materialize_missing_recursive_closeout_artifacts(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        self.assertTrue((run_root / "02-to-be-plan.md").exists())
-        self.assertTrue((run_root / "03-implementation-summary.md").exists())
-        self.assertTrue((run_root / "04-test-summary.md").exists())
-        self.assertTrue((run_root / "05-manual-qa.md").exists())
-        self.assertTrue((run_root / "06-decisions-update.md").exists())
-        self.assertTrue((run_root / "07-state-update.md").exists())
-        self.assertTrue((run_root / "08-memory-impact.md").exists())
-        self.assertTrue((run_root / "evidence" / "perf").exists())
-        self.assertTrue((run_root / "evidence" / "traces").exists())
-        phase2 = (run_root / "02-to-be-plan.md").read_text(encoding="utf-8")
-        self.assertIn("Status: `LOCKED`", phase2)
-        self.assertIn("Implementation Surface:", phase2)
-        phase3 = (run_root / "03-implementation-summary.md").read_text(encoding="utf-8")
-        self.assertIn("TDD Compliance: PASS", phase3)
-        phase4 = (run_root / "04-test-summary.md").read_text(encoding="utf-8")
-        self.assertIn("Verification Evidence:", phase4)
-        manual_qa = (run_root / "05-manual-qa.md").read_text(encoding="utf-8")
-        self.assertIn("QA Execution Mode: agent-operated", manual_qa)
-        memory_impact = (run_root / "08-memory-impact.md").read_text(encoding="utf-8")
-        self.assertIn("Skill Usage Relevance: not-relevant", memory_impact)
-
-    def test_reconcile_phase8_skill_usage_relevance_normalizes_invalid_value(self) -> None:
-        run_root = self.repo_root / ".recursive" / "run" / self.run_id
-        self._write(
-            run_root / "08-memory-impact.md",
-            "\n".join(
-                [
-                    "## Run-Local Skill Usage Capture",
-                    "",
-                    "- Skill Usage Relevance: low",
-                    "- Available Skills: `browser-use`",
-                    "- Skills Sought: none",
-                    "- Skills Attempted: `browser-use`",
-                    "- Skills Used: `browser-use`",
-                    "- Worked Well: screenshots captured",
-                    "- Issues Encountered: none",
-                    "- Future Guidance: use browser-use again",
-                    "- Promotion Candidates: none",
-                ]
-            ),
-        )
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        self._write(
-            logs_root / "recursive-lint.log",
-            "\n".join(
-                [
-                    "Linting run: benchmark-test-run",
-                    "[FAIL] 08-memory-impact.md: Run-Local Skill Usage Capture must declare Skill Usage Relevance: relevant|not-relevant",
-                ]
-            ),
-        )
-        result = self._make_result()
-        result.recursive_workflow_status = "lint-failed"
-
-        changed = self.harness.reconcile_phase8_skill_usage_relevance(self.repo_root, logs_root, result)
-
-        self.assertTrue(changed)
-        updated = (run_root / "08-memory-impact.md").read_text(encoding="utf-8")
-        self.assertIn("- Skill Usage Relevance: relevant", updated)
 
     def test_evaluate_recursive_run_clears_stale_lint_and_missing_artifact_issues(self) -> None:
         run_root = self.repo_root / ".recursive" / "run" / self.run_id
@@ -2365,7 +1681,6 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
 
         self.harness.run_model_prompt = fake_run_model_prompt  # type: ignore[method-assign]
         self.harness.evaluate_recursive_run = fake_evaluate_recursive_run  # type: ignore[method-assign]
-        self.harness.reconcile_recursive_closeout_artifacts = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
 
         repair_record = self.harness.maybe_repair_recursive_run(
             self.repo_root,
@@ -2379,33 +1694,6 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertEqual(2, evaluation_count)
         self.assertEqual("complete", result.recursive_workflow_status)
 
-    def test_maybe_repair_recursive_run_skips_model_when_controller_reconciliation_completes(self) -> None:
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        result = self._make_result()
-        result.recursive_workflow_status = "incomplete"
-        result.recursive_artifact_status = {name: False for name in rrb.REQUIRED_RECURSIVE_RUN_FILES}
-        evaluation_count = 0
-
-        def fake_evaluate_recursive_run(repo_root: Path, logs_root_arg: Path, result_arg: rrb.ArmResult) -> None:
-            nonlocal evaluation_count
-            evaluation_count += 1
-            result_arg.recursive_workflow_status = "complete"
-
-        self.harness.evaluate_recursive_run = fake_evaluate_recursive_run  # type: ignore[method-assign]
-        self.harness.reconcile_recursive_closeout_artifacts = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-        self.harness.run_model_prompt = mock.Mock(side_effect=AssertionError("model repair should not run"))  # type: ignore[method-assign]
-
-        repair_record = self.harness.maybe_repair_recursive_run(
-            self.repo_root,
-            logs_root,
-            self.harness.runner_configs[0],
-            result,
-        )
-
-        self.assertIsNone(repair_record)
-        self.assertEqual(1, evaluation_count)
-        self.assertEqual("complete", result.recursive_workflow_status)
 
     def test_maybe_repair_recursive_run_skips_preflight_runner_failure_without_worktree(self) -> None:
         logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
@@ -2444,36 +1732,6 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertIsNone(repair_record)
         self.assertIn("skipped closeout synthesis", "\n".join(result.issues).lower())
 
-    def test_maybe_repair_recursive_run_rechecks_after_controller_reconciliation(self) -> None:
-        logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
-        logs_root.mkdir(parents=True, exist_ok=True)
-        result = self._make_result()
-        result.recursive_workflow_status = "incomplete"
-        result.recursive_artifact_status = {name: False for name in rrb.REQUIRED_RECURSIVE_RUN_FILES}
-        evaluation_count = 0
-
-        def fake_evaluate_recursive_run(repo_root: Path, logs_root_arg: Path, result_arg: rrb.ArmResult) -> None:
-            nonlocal evaluation_count
-            evaluation_count += 1
-            if evaluation_count == 1:
-                result_arg.recursive_workflow_status = "lint-failed"
-            else:
-                result_arg.recursive_workflow_status = "complete"
-
-        self.harness.evaluate_recursive_run = fake_evaluate_recursive_run  # type: ignore[method-assign]
-        self.harness.reconcile_recursive_closeout_artifacts = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-        self.harness.run_model_prompt = mock.Mock(side_effect=AssertionError("model repair should not run"))  # type: ignore[method-assign]
-
-        repair_record = self.harness.maybe_repair_recursive_run(
-            self.repo_root,
-            logs_root,
-            self.harness.runner_configs[0],
-            result,
-        )
-
-        self.assertIsNone(repair_record)
-        self.assertEqual(2, evaluation_count)
-        self.assertEqual("complete", result.recursive_workflow_status)
 
     def test_maybe_repair_recursive_run_attempts_routed_evidence_repair(self) -> None:
         logs_root = self.workspace_root / "codex" / "recursive-on" / "logs"
@@ -2511,7 +1769,6 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
 
         self.harness.run_model_prompt = fake_run_model_prompt  # type: ignore[method-assign]
         self.harness.evaluate_recursive_run = fake_evaluate_recursive_run  # type: ignore[method-assign]
-        self.harness.reconcile_recursive_closeout_artifacts = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
 
         repair_record = self.harness.maybe_repair_recursive_run(
             self.repo_root,

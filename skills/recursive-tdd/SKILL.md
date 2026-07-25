@@ -1,394 +1,112 @@
 ---
 name: recursive-tdd
-description: 'Use when implementing any code in recursive-mode Phase 3. Enforces strict RED-GREEN-REFACTOR discipline with The Iron Law - no production code without a failing test first. Trigger phrases: "implement this", "add feature", "fix bug", "write a failing test", "TDD".'
+description: 'Test-driven development for every Recursive Phase 3 code change. Use when implementing code in Recursive Phase 3, including features, bug fixes, behavior changes, and planned refactoring; or when the user asks for test-first development, mentions RED-GREEN-REFACTOR, or wants integration tests.'
 ---
 
-# recursive-tdd
+# Recursive TDD
 
-## Overview
+TDD is the RED → GREEN loop. Run one approved behavior at a time as a tracer bullet, then perform a bounded REFACTOR while green. This skill makes that loop produce tests worth keeping and records the evidence required by Recursive Phase 3.
 
-Test-Driven Development is mandatory for all recursive-mode implementation work. This skill ensures test-first discipline is followed rigorously and recorded in a way recursive-mode tooling can verify.
+Preserve the Iron Law:
 
-**Core Principle:** If you didn't watch the test fail, you don't know if it tests the right thing.
-
-**The Iron Law for recursive-mode:**
-```
+```text
 NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
 ```
 
-## Trigger examples
+## Orient on the approved surface
 
-- `Implement Phase 3 for run '<run-id>'`
-- `Add a failing regression test first, then fix the bug`
-- `I already wrote the code; now add tests` (should trigger TDD reset guidance)
-- `Follow RED-GREEN-REFACTOR for this change`
+Read the effective `02-to-be-plan.md`, including its addenda, and locate the `Test Surface` records for the active R#. Use the run's approved requirements, glossary terms, plan, and decisions so test names match the project's domain language.
 
-## When to Use
+- Work one `TS-*` record at a time.
+- Use its observable behavior, approved seam, test level, dependency choices, and independent expected-value source.
+- Phase 3 may not invent a seam. Route a newly required or changed seam through the normal plan/design addendum and human gate before implementation.
 
-**Always in Phase 3 (Implementation):**
-- New features
-- Bug fixes
-- Refactoring
-- Behavior changes
+Before selecting, writing, or revising a test, load [references/test-quality.md](references/test-quality.md). It owns behavior-test examples, anti-patterns, assertion quality, test-level selection, and mocking guidance.
 
-**Default rule:**
-- Not for "simple" changes
-- Not when "under pressure"
-- Not because "tests after achieve same goals"
+Complete orientation when one active `TS-*` record and its exact focused test command are known.
 
-**Explicit exception path only:**
-- If strict RED-first flow is genuinely infeasible, declare `TDD Mode: pragmatic` in the Phase 3 artifact
-- Record a concrete exception reason
-- Record compensating validation evidence under `/.recursive/run/<run-id>/evidence/`
-- Treat this as an explicit deviation, not a silent shortcut
+## Declare the mode
 
-## RED-GREEN-REFACTOR Cycle
+Use `TDD Mode: strict` by default. Strict mode requires observed RED and GREEN evidence under `/.recursive/run/<run-id>/evidence/logs/`.
 
-```dot
-digraph tdd_cycle {
-    rankdir=LR;
-    red [label="RED\nWrite failing test", shape=box, style=filled, fillcolor="#ffcccc"];
-    verify_red [label="Verify fails\ncorrectly", shape=diamond];
-    green [label="GREEN\nMinimal code", shape=box, style=filled, fillcolor="#ccffcc"];
-    verify_green [label="Verify passes\nAll green", shape=diamond];
-    refactor [label="REFACTOR\nClean up", shape=box, style=filled, fillcolor="#ccccff"];
-    record [label="Record in\nPhase 3 artifact", shape=box];
+Use `TDD Mode: pragmatic` only when strict RED-first execution is genuinely infeasible. Record a concrete `## Pragmatic TDD Exception`, compensating validation, evidence paths, and every `Test Surface: TS-*` covered by the exception. Treat this as a visible deviation, never a shortcut.
 
-    red -> verify_red;
-    verify_red -> green [label="yes"];
-    verify_red -> red [label="wrong\nfailure"];
-    green -> verify_green;
-    verify_green -> refactor [label="yes"];
-    verify_green -> green [label="no"];
-    refactor -> verify_green [label="stay\ngreen"];
-    verify_green -> record;
-}
-```
+Complete mode selection when the Phase 3 artifact names the mode and its required evidence path.
 
-### RED - Write Failing Test
+## Run one tracer-bullet cycle
 
-Write one minimal test showing what should happen.
+### RED
 
-**Requirements:**
-- One behavior per test
-- Clear, descriptive name
-- Test real code (no mocks unless unavoidable)
-- Clear assertion showing expected outcome
+1. Write the narrowest behavior test for the active `TS-*` record.
+2. Run its focused command.
+3. Confirm a failing assertion, not setup noise or a syntax error.
+4. Confirm the failure is caused by the missing behavior.
+5. Record the `TS-*` ID, test, exact command, expected failure, actual failure, and RED evidence path in `## TDD Compliance Log`.
 
-<Good>
-```typescript
-test('rejects empty email with clear error message', async () => {
-  const result = await submitForm({ email: '' });
-  expect(result.error).toBe('Email is required');
-});
-```
-</Good>
+If the test passes immediately or fails for the wrong reason, revise the test and recapture RED before touching production code.
 
-<Bad>
-```typescript
-test('email validation works', async () => {
-  const mock = jest.fn().mockResolvedValue({ valid: true });
-  const result = await validateEmail(mock);
-  expect(mock).toHaveBeenCalled();
-});
-```
-</Bad>
+Complete RED only after personally observing the relevant failure and writing its evidence.
 
-### Verify RED - Watch It Fail
+### GREEN
 
-**MANDATORY. Never skip.**
+1. Implement only the behavior named by the active `TS-*` record.
+2. Re-run the focused command and confirm it passes.
+3. Run any adjacent checks needed to show the slice did not regress.
+4. Record the minimal change, command, result, and GREEN evidence path.
 
-```bash
-npm test path/to/test.test.ts
-```
+Complete GREEN only when the approved behavior passes at the approved seam.
 
-**Confirm:**
-- Test fails (not errors)
-- Failure message is expected
-- Fails because feature missing (not typos)
+### Bounded REFACTOR
 
-**Record in Phase 3 artifact:**
-```markdown
-### TDD Cycle for R3 (Email Validation)
+After GREEN, improve names, remove local duplication, or simplify the just-green path. Keep the suite green and stay inside the approved seam and plan.
 
-TDD Mode: strict
+A change to behavior, seam, interface, dependency placement, module ownership, or plan scope is broader than a bounded refactor. Route it through the appropriate design/addendum owner or create a lossless review finding.
 
-RED Evidence:
-- `/.recursive/run/<run-id>/evidence/logs/red/<file>.log`
+Record the cleanup and verification command, or record `N/A` when the minimal GREEN needs no cleanup. Complete REFACTOR only while the same behavior remains green at the same seam.
 
-GREEN Evidence:
-- `/.recursive/run/<run-id>/evidence/logs/green/<file>.log`
+Then select the next ready `TS-*` record and repeat. Do not batch imagined tests horizontally before implementing the first vertical tracer bullet.
 
-**RED Phase:**
-- Test: `rejects empty email with clear error message`
-- Command: `npm test src/forms/email.test.ts`
-- Expected failure: "Email is required" not found
-- Actual failure: [paste output]
-- RED verified: PASS
-```
+### Prototype handoff
 
-### GREEN - Minimal Code
+Derive the production test from the accepted requirement and human-confirmed seam. Record actual RED before consulting or lifting prototype logic. After RED, prototype logic may inform minimal GREEN. Keep lifted logic untrusted until the bounded refactor, all planned test suites, and review pass.
 
-Write simplest code to pass the test.
+## Record the canonical artifact
 
-**Rules:**
-- Just enough to pass
-- No additional features
-- No "while I'm here" improvements
-- No refactoring yet
+Use the Phase 3 `## TDD Compliance Log` schema and gates owned by `/.recursive/RECURSIVE.md`. For every strict cycle, include:
 
-<Good>
-```typescript
-function submitForm(data: FormData) {
-  if (!data.email?.trim()) {
-    return { error: 'Email is required' };
-  }
-  // ... rest of form handling
-}
-```
-</Good>
+- the canonical `RED Evidence` and `GREEN Evidence` paths;
+- Requirement ID and `Test Surface: TS-*`;
+- test path and test name;
+- exact RED command, expected/actual failure, and RED evidence;
+- minimal GREEN change, command, result, and GREEN evidence;
+- bounded REFACTOR or `N/A`, plus green verification.
 
-<Bad>
-```typescript
-function submitForm(
-  data: FormData,
-  options?: {
-    strictMode?: boolean;
-    customValidators?: Validator[];
-    onValidationError?: (err: Error) => void;
-  }
-) {
-  // YAGNI - over-engineered
-}
-```
-</Bad>
+Keep `## Review Metadata`, `## Requirement Completion Status`, Coverage, TDD Compliance, and Approval gates aligned with the canonical phase contract. Do not duplicate the full scaffold in this skill.
 
-**Record in Phase 3 artifact:**
-```markdown
-**GREEN Phase:**
-- Implementation: Added null check for email field
-- Command: `npm test src/forms/email.test.ts`
-- Result: PASS
-- GREEN verified: PASS
-```
+The review block must retain `Review Ledger Path` and `Review Bundle Path` so the common lossless ledger remains mechanically reachable from this specialized TDD artifact.
 
-### REFACTOR - Clean Up
+### Routing awareness
 
-After green only:
-- Remove duplication
-- Improve names
-- Extract helpers
-- Keep tests green
-
-**Never add behavior during refactor.**
-
-**Record in Phase 3 artifact:**
-```markdown
-**REFACTOR Phase:**
-- Extracted `validateRequired(field, name)` helper
-- Renamed `submitForm` to `processFormSubmission` for clarity
-- All tests still passing: PASS
-```
-
-## Common Process Shortcuts (STOP)
-
-| Excuse | Reality |
-|--------|---------|
-| "This is just a simple fix, no test needed" | Simple code breaks. Test takes 30 seconds. |
-| "I'll test after confirming the fix works" | Tests passing immediately prove nothing. You never saw it catch the bug. |
-| "Tests after achieve same goals" | Tests-after = "what does this do?" Tests-first = "what should this do?" |
-| "I already manually tested it" | Ad-hoc != systematic. No record, can't re-run, no regression protection. |
-| "Deleting working code is wasteful" | Sunk cost fallacy. Keeping unverified code is technical debt. |
-| "TDD is dogmatic, I'm being pragmatic" | TDD IS pragmatic. Finds bugs before commit, enables refactoring. |
-| "I'll keep the code as reference" | You'll adapt it. That's testing after. Delete means delete. |
-| "Test hard = design unclear" | Listen to the test. Hard to test = hard to use. Simplify design. |
-| "I need to explore first" | Fine. Throw away exploration, start TDD fresh. |
-| "This is different because..." | It's not. The rules don't have exceptions. |
-
-## Red Flags - STOP and Start Over
-
-If you encounter any of these, DELETE CODE and restart with TDD:
-
-- [X] Code written before test
-- [X] Test passes immediately (not testing what you think)
-- [X] "I'll add tests later"
-- [X] "This is too simple to test"
-- [X] "I know what I'm doing, I don't need the ritual"
-- [X] Can't explain why test failed (or didn't fail)
-- [X] Test testing mock behavior, not real behavior
-- [X] Multiple behaviors in one test ("and" in test name)
-
-## Integration with recursive-mode Phase 3
-
-## Routing Awareness
-
-If TDD execution uses delegated review, test audit, or bounded routed implementation help, re-read:
+Before delegated TDD execution, re-read:
 
 - `/.recursive/config/recursive-router.json`
 - `/.recursive/config/recursive-router-discovered.json`
 
-immediately before choosing the delegated CLI/model, and use the routed policy or explicit fallback rather than ad hoc model selection.
+Use the routed policy or its explicit fallback. The controller still verifies RED, GREEN, the diff, and every claimed outcome.
 
-### Phase 3 Artifact TDD Section
+## Recovery
 
-Every Phase 3 artifact must include:
+- Production code before RED: remove that implementation and restart from the approved `TS-*` record.
+- RED passes: strengthen or correct the test until the missing behavior fails.
+- RED is setup noise: repair setup and recapture RED.
+- The test or seam is wrong: stop; route the decision back through the plan or addendum rather than silently changing the oracle.
+- Exploration is needed: throw it away, then start the production cycle fresh.
+- "I'll keep exploratory code as reference": leave it isolated until actual RED exists; prototype handoff governs any later consultation.
 
-```markdown
-## TODO
+## Done when
 
-- [ ] Replace every placeholder with concrete TDD evidence for the current implementation phase.
-
-## Audit Context
-
-Audit Execution Mode: self-audit / subagent
-Subagent Availability: available / unavailable
-Subagent Capability Probe: [what proved availability or unavailability]
-Delegation Decision Basis: [why self-audit or delegation was chosen]
-
-## TDD Compliance Log
-
-TDD Mode: strict
-
-RED Evidence:
-- `/.recursive/run/<run-id>/evidence/logs/red/<file>.log`
-
-GREEN Evidence:
-- `/.recursive/run/<run-id>/evidence/logs/green/<file>.log`
-
-### Requirement R1 (Feature X)
-
-**Test:** `test/features/x.test.ts` - "should do Y when Z"
-- RED: [timestamp] - Failed as expected: [output]
-- GREEN: [timestamp] - Minimal implementation: [description]
-- REFACTOR: [timestamp] - Cleanups: [description]
-- Final state: PASS - all tests passing
-
-### Requirement R2 (Bug Fix)
-
-**Regression Test:** `test/bugs/issue-123.test.ts` - "reproduces crash on empty input"
-- RED: [timestamp] - Confirmed bug: [output]
-- GREEN: [timestamp] - Fix applied: [description]
-- REFACTOR: [timestamp] - N/A (minimal fix)
-- Final state: PASS - test passes, bug fixed
-
-## Requirement Completion Status
-
-- `R1` | `implemented` | Changed Files: `path/to/file`
-- `R1` | `verified` | Evidence: `/.recursive/run/<run-id>/evidence/logs/green/<file>.log`
-```
-
-If strict mode cannot be followed, the artifact must include:
-
-```markdown
-## Pragmatic TDD Exception
-
-Exception reason: [specific reason strict RED-first flow was not feasible]
-Compensating validation:
-- [extra tests, targeted manual verification, diff review, etc.]
-- `/.recursive/run/<run-id>/evidence/<supporting-file>`
-```
-
-### Phase 3 Coverage Gate Addition
-
-```markdown
-## Coverage Gate
-
-- [ ] Every new function has a corresponding test
-- [ ] Every bug fix has a regression test that fails before fix
-- [ ] All RED phases documented with failure output
-- [ ] All GREEN phases documented with minimal implementation
-- [ ] All tests passing (no skipped tests)
-- [ ] No production code written before failing test
-
-TDD Compliance: PASS / FAIL
-```
-
-### Phase 3 Approval Gate Addition
-
-```markdown
-## Approval Gate
-
-- [ ] TDD Compliance: PASS
-- [ ] Implementation matches Phase 3 plan
-- [ ] No code without preceding failing test
-- [ ] All tests documented in TDD Compliance Log
-
-Approval: PASS / FAIL
-```
-
-## Bug Fix TDD Procedure
-
-1. **Add Regression Test First**
-   - Write test that reproduces the bug
-   - Run test, confirm it fails with expected error
-   - Document failure in Phase 3 artifact
-
-2. **Implement Minimal Fix**
-   - Fix only what's needed to make test pass
-   - Run test, confirm it passes
-   - Document fix in Phase 3 artifact
-
-3. **Verify No Regressions**
-   - Run full test suite
-   - Confirm nothing else broke
-   - Document in Phase 3 artifact
-
-4. **Lock Phase 3**
-   - TDD Mode is declared
-   - TDD Compliance: PASS
-   - Approval: PASS
-   - Status: LOCKED
-
-## Example: Complete Phase 3 TDD Section
-
-```markdown
-## TDD Compliance Log
-
-### R1: Add email validation
-
-**Test:** `test/forms/validation.test.ts`
-
-RED Phase (2026-02-21T10:15:00Z):
-```bash
-$ npm test test/forms/validation.test.ts
-FAIL: Expected 'Email is required', got undefined
-```
-RED verified: PASS
-
-GREEN Phase (2026-02-21T10:18:00Z):
-- Added null check in `submitForm()` function
-- Test passes
-GREEN verified: PASS
-
-REFACTOR Phase (2026-02-21T10:22:00Z):
-- Extracted `validateRequired()` helper
-- All tests still passing
-REFACTOR complete: PASS
-
-### R2: Fix crash on empty array
-
-**Regression Test:** `test/utils/array.test.ts`
-
-RED Phase (2026-02-21T10:25:00Z):
-```bash
-$ npm test test/utils/array.test.ts
-FAIL: TypeError: Cannot read property 'map' of undefined
-```
-RED verified: Bug reproduced PASS
-
-GREEN Phase (2026-02-21T10:27:00Z):
-- Added guard clause in `processItems()`
-- Test passes
-GREEN verified: PASS
-
-REFACTOR: N/A (minimal 2-line fix)
-
-## Verification
-
-Full suite run: `npm test`
-Result: 47 passing, 0 failing
-```
-
-## References
-
-- **REQUIRED:** Follow this skill for all Phase 3 implementation work
+- every planned `TS-*` record is referenced by a completed strict cycle or an approved pragmatic exception;
+- every strict cycle has relevant RED and GREEN evidence;
+- every bounded refactor stayed inside its approved seam and plan;
+- focused, adjacent, and planned full-suite commands are green;
+- TDD Compliance, Coverage, review, and Approval gates pass.

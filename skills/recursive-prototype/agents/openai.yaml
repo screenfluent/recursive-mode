@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recursive Prototype"
+  short_description: "Answer a design question with throwaway code"
+  default_prompt: "Use $recursive-prototype to answer a design question with an isolated throwaway prototype."

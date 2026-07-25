@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recursive Residue Sweep"
+  short_description: "Clean or inspect residue in authorized changes"
+  default_prompt: "Use $recursive-residue-sweep to inspect this change set for residue and clean safe findings."

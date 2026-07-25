@@ -103,7 +103,6 @@ RECURSIVE_EVALUATION_ISSUE_PREFIXES = (
 )
 RECURSIVE_CONTROLLER_SYNTHESIS_MARKERS = (
     "Benchmark controller synthesized",
-    "Benchmark controller uses self-audit here because no durable delegated subagent facility is available",
 )
 RECURSIVE_HELPER_SCRIPT_NAMES = (
     "recursive-review-bundle.py",
@@ -128,6 +127,10 @@ RECURSIVE_HELPER_SCRIPT_NAMES = (
     "lint-recursive-run.ps1",
     "verify-locks.py",
     "verify-locks.ps1",
+    "recursive_phase_rules.py",
+    "recursive_review_action.py",
+    "recursive_review_ledger.py",
+    "recursive_review_surface.py",
     "recursive_router_lib.py",
     "recursive_router_cli_lib.py",
 )
@@ -200,6 +203,7 @@ class BenchmarkRequirementSpec:
     requirement_id: str
     title: str
     source_quote: str
+    acceptance_criteria: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -239,7 +243,6 @@ class ArmResult:
     recursive_workflow_status: str = "n/a"
     recursive_isolation_status: str = "n/a"
     recursive_worktree_location: str = ""
-    recursive_workflow_profile: str = "n/a"
     recursive_phase2_guardrails: str = "n/a"
     recursive_run_root: str = ""
     recursive_artifact_status: dict[str, bool] = field(default_factory=dict)
@@ -418,6 +421,7 @@ class BenchmarkHarness:
         self.args = args
         self.script_dir = Path(__file__).resolve().parent
         self.repo_source_root = self.script_dir.parent
+        self.runtime_dir = self.repo_source_root / "skills" / "recursive-mode" / "scripts"
         self.scenario_name = args.scenario
         self.scenario_meta = SCENARIOS[self.scenario_name]
         self.scenario_title = self.scenario_meta["title"]
@@ -434,7 +438,7 @@ class BenchmarkHarness:
         self.judge_timeout = min(self.max_seconds, DEFAULT_JUDGE_TIMEOUT_SECONDS)
         self.command_timeout = max(60, args.command_timeout)
         self.preview_timeout = max(15, args.preview_timeout)
-        self.run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz")
         self.results: list[ArmResult] = []
         self.summary_notes: list[str] = []
         self.effective_arm_modes: dict[str, str] = {}
@@ -1564,7 +1568,6 @@ class BenchmarkHarness:
 
         self.write_arm_progress(result, "evaluating", detail="Agent run finished; evaluating build, tests, preview, and artifacts.")
         self.evaluate_repo(repo_root, product_root, logs_root, result)
-        self.reconcile_recursive_closeout_artifacts(repo_root, logs_root, result)
         repair_record = self.maybe_repair_recursive_run(repo_root, logs_root, runner, result)
         if repair_record is not None:
             result.duration_seconds += result.phase_durations.get("recursive_repair", 0.0)
@@ -1745,7 +1748,7 @@ class BenchmarkHarness:
             seeded_skill_docs: list[str] = []
             seeded_helper_scripts: list[str] = []
             bootstrap_result = self.run_command(
-                [self.python_exe, str(self.script_dir / "install-recursive-mode.py"), "--repo-root", str(repo_root)],
+                [self.python_exe, str(self.runtime_dir / "install-recursive-mode.py"), "--repo-root", str(repo_root)],
                 cwd=repo_root,
                 timeout_seconds=self.command_timeout,
                 check=False,
@@ -1787,7 +1790,7 @@ class BenchmarkHarness:
             init_result = self.run_command(
                 [
                     self.python_exe,
-                    str(self.script_dir / "recursive-init.py"),
+                    str(self.runtime_dir / "recursive-init.py"),
                     "--repo-root",
                     str(repo_root),
                     "--run-id",
@@ -1841,7 +1844,7 @@ class BenchmarkHarness:
                     "run_template_root": "benchmark/recursive-templates",
                 }
             )
-            bootstrap_template = self.repo_source_root / "references" / "bootstrap" / "RECURSIVE.md"
+            bootstrap_template = self.repo_source_root / "skills" / "recursive-mode" / "references" / "bootstrap" / "RECURSIVE.md"
             if bootstrap_template.exists():
                 context_payload.update(
                     {
@@ -2004,7 +2007,8 @@ class BenchmarkHarness:
             lines.append(f"    {handoff_line}")
         lines.extend(
             [
-                f"  - Review Bundle Path: `/.recursive/run/{run_id}/evidence/review-bundles/<phase>-<role>.md`",
+                f"  - Review Bundle Path: `/.recursive/run/{run_id}/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`",
+                f"  - Review Ledger Path: `/.recursive/run/{run_id}/evidence/reviews/<phase-key>/<review-id>/ledger.md`",
                 "    Handoff contract: the delegated phase output is not accepted until the orchestrator verifies the bundle/action-record fields against the current artifact and current diff-owned scope.",
             ]
         )
@@ -2035,7 +2039,8 @@ class BenchmarkHarness:
                     "",
                     "- Use exactly one active phase at a time.",
                     "- For every routed phase handoff, prepare the review bundle, dispatch the configured role, write the durable action record, reconcile the delegated output into the phase artifact, rerun phase-local audit/lint, lock the artifact, and only then advance.",
-                    f"- Review Bundle Path: `/.recursive/run/{result.run_id or 'benchmark-run-id-missing'}/evidence/review-bundles/<phase>-<role>.md`",
+                    f"- Review Bundle Path: `/.recursive/run/{result.run_id or 'benchmark-run-id-missing'}/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`",
+                    f"- Review Ledger Path: `/.recursive/run/{result.run_id or 'benchmark-run-id-missing'}/evidence/reviews/<phase-key>/<review-id>/ledger.md`",
                     "",
                 ]
             )
@@ -2187,7 +2192,7 @@ class BenchmarkHarness:
     def recursive_helper_script_sources(self) -> dict[str, Path]:
         sources: dict[str, Path] = {}
         for file_name in RECURSIVE_HELPER_SCRIPT_NAMES:
-            source_path = self.script_dir / file_name
+            source_path = self.runtime_dir / file_name
             if source_path.exists():
                 sources[f"scripts/{file_name}"] = source_path
         return sources
@@ -2380,7 +2385,6 @@ class BenchmarkHarness:
                 f"Run: `/.recursive/run/{run_id}/`",
                 "Phase: `00 Requirements`",
                 "Status: `LOCKED`",
-                "Workflow version: `recursive-mode-audit-v2`",
                 "Inputs:",
                 f"- Benchmark fixture: `{scenario_source}`",
                 "Outputs:",
@@ -2410,20 +2414,41 @@ class BenchmarkHarness:
                 "Approval: PASS",
             ]
         )
+        provisional = provisional.rstrip() + "\n"
         lock_hash = lock_hash_from_content(provisional)
         return provisional.replace(f"`{'0' * 64}`", f"`{lock_hash}`", 1)
 
     def benchmark_requirement_specs(self) -> list[BenchmarkRequirementSpec]:
         requirements_text = self.requirements_path.read_text(encoding="utf-8")
         specs: list[BenchmarkRequirementSpec] = []
-        pattern = re.compile(r"(?ms)^###\s+`(R\d+)`\s+([^\r\n]+)\s*\n\s*\nDescription:\s*([^\r\n]+)")
+        pattern = re.compile(
+            r"(?ms)^###\s+`(R\d+)`\s+([^\r\n]+)\s*\n(.*?)(?=^###\s+`R\d+`|^##\s+Out of Scope|\Z)"
+        )
         for match in pattern.finditer(requirements_text):
-            requirement_id, title, description = match.groups()
+            requirement_id, title, body = match.groups()
+            description_match = re.search(r"(?m)^Description:\s*([^\r\n]+)", body)
+            criteria_match = re.search(
+                r"(?ms)^Acceptance criteria:\s*\n(.*?)(?=^\s*$|\Z)",
+                body,
+            )
+            if not description_match or not criteria_match:
+                raise BenchmarkError(
+                    f"Requirement {requirement_id} is missing its description or acceptance criteria"
+                )
+            description = description_match.group(1)
+            acceptance_criteria = tuple(
+                line.removeprefix("- ").strip()
+                for line in criteria_match.group(1).splitlines()
+                if line.strip().startswith("- ")
+            )
+            if not acceptance_criteria:
+                raise BenchmarkError(f"Requirement {requirement_id} has no acceptance criteria")
             specs.append(
                 BenchmarkRequirementSpec(
                     requirement_id=requirement_id.strip(),
                     title=title.strip(),
                     source_quote=f"Description: {description.strip()}",
+                    acceptance_criteria=acceptance_criteria,
                 )
             )
         return specs
@@ -2505,6 +2530,23 @@ class BenchmarkHarness:
                 )
             return lines
 
+        def test_surface_lines() -> list[str]:
+            lines: list[str] = []
+            test_surface_index = 1
+            for spec in specs:
+                for criterion in spec.acceptance_criteria:
+                    lines.append(
+                        f"- TS-{test_surface_index:03d} | Requirement: {spec.requirement_id} | "
+                        f"Behavior: {criterion} | "
+                        f"Seam: {self.benchmark_acceptance_seam(criterion)} | Level: integration | "
+                        "Real Dependencies: local application runtime and repository test toolchain | "
+                        "Replaced Dependencies: none | "
+                        f"Expected From: {spec.requirement_id} acceptance criterion in "
+                        f"`/.recursive/run/{run_id}/00-requirements.md`: {criterion}"
+                    )
+                    test_surface_index += 1
+            return lines
+
         def implemented_status_lines() -> list[str]:
             lines: list[str] = []
             for spec in specs:
@@ -2535,14 +2577,14 @@ class BenchmarkHarness:
         def traceability_lines(note: str) -> list[str]:
             return [f"- {spec.requirement_id} -> TODO {note}" for spec in specs]
 
-        def audit_sections(requirement_lines: list[str], inputs: list[str], gap_note: str) -> list[str]:
+        def review_sections(requirement_lines: list[str], inputs: list[str]) -> list[str]:
             return [
                 "## Audit Context",
                 "",
-                "- Audit Execution Mode: self-audit",
-                "- Subagent Availability: unavailable",
-                "- Subagent Capability Probe: Benchmark runner prompt does not expose durable delegated subagent execution in this disposable repo.",
-                "- Delegation Decision Basis: Use self-audit unless the runner proves subagent support during the benchmark.",
+                "- Audit Execution Mode: TODO choose subagent or self-audit after the capability probe.",
+                "- Subagent Availability: TODO record available or unavailable.",
+                "- Subagent Capability Probe: TODO record the concrete probe result.",
+                "- Delegation Decision Basis: TODO explain why the selected mode follows from the probe.",
                 "- Audit Inputs Provided:",
                 *[f"  - `{path}`" for path in inputs],
                 "",
@@ -2552,15 +2594,15 @@ class BenchmarkHarness:
                 "",
                 "## Earlier Phase Reconciliation",
                 "",
-                "- No earlier audited phase drift has been reconciled in this template yet; replace with actual reconciliation notes before locking.",
+                "- TODO reconcile every locked upstream claim and applicable addendum against current evidence.",
                 "",
                 "## Subagent Contribution Verification",
                 "",
-                "- Reviewed Action Records: none (self-audit draft scaffold)",
-                f"- Main-Agent Verification Performed: `.recursive/run/{run_id}/00-requirements.md`, `.recursive/RECURSIVE.md`",
-                "- Acceptance Decision: accepted",
-                "- Refresh Handling: No delegated artifacts were refreshed in this self-audit draft scaffold.",
-                "- Repair Performed After Verification: Replace with concrete audit repairs if this phase changes after verification.",
+                "- Reviewed Action Records: TODO record none or concrete action-record paths.",
+                "- Main-Agent Verification Performed: TODO record actual files, diffs, bundles, and artifacts checked.",
+                "- Acceptance Decision: TODO record accepted, partially accepted, or rejected.",
+                "- Refresh Handling: TODO record whether changed evidence required a refreshed bundle or action record.",
+                "- Repair Performed After Verification: TODO record none or concrete repair paths.",
                 "",
                 "## Worktree Diff Audit",
                 "",
@@ -2570,24 +2612,24 @@ class BenchmarkHarness:
                 f"- Normalized baseline: `{baseline_commit}`",
                 "- Normalized comparison: working-tree",
                 f"- Normalized diff command: `git diff --name-only {baseline_commit}`",
-                "- Reviewed paths: TODO replace with the actual diff-owned paths for this phase.",
-                "",
-                "## Gaps Found",
-                "",
-                f"- {gap_note}",
-                "",
-                "## Repair Work Performed",
-                "",
-                "- Template scaffold only. Replace with any real audit-repair work performed before locking.",
+                "- Planned or claimed changed files:",
+                "  - TODO replace with the phase-owned planned or claimed paths.",
+                "- Actual changed files reviewed:",
+                "  - TODO replace with the actual diff-owned paths for this phase.",
+                "- Unexplained drift: TODO record none or explain it.",
                 "",
                 "## Requirement Completion Status",
                 "",
                 *requirement_lines,
                 "",
-                "## Audit Verdict",
+                "## Review Metadata",
                 "",
-                "Audit: FAIL",
-                "- Summary: Draft scaffold only; replace placeholders, rerun the audit, then promote to PASS before locking.",
+                "- Review ID: TODO",
+                f"- Review Ledger Path: `/.recursive/run/{run_id}/evidence/reviews/<phase-key>/<review-id>/ledger.md`",
+                f"- Latest Verified Pass: `/.recursive/run/{run_id}/evidence/reviews/<phase-key>/<review-id>/passes/<NNNN>.md`",
+                "- Latest Verified Pass Hash: TODO",
+                f"- Review Bundle Path: `/.recursive/run/{run_id}/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`",
+                "- Review Bundle Hash: TODO",
                 "",
                 "## Coverage Gate",
                 "",
@@ -2681,7 +2723,7 @@ class BenchmarkHarness:
                 "",
                 f"- [ ] Replace placeholder evidence with real repo-root-relative paths under `{worktree_root}/` or `/.recursive/run/{run_id}/`.",
                 "- [ ] Keep prose in `Rationale`; keep `Blocking Evidence` limited to concrete existing file or artifact paths.",
-                "- [ ] Keep `Gaps Found` limited to real audit defects in the analysis itself; expected blank-starter feature gaps belong in baseline findings and requirement status, not unresolved PASS-blocking gaps.",
+                "- [ ] Record audit findings only in the canonical review ledger and keep this artifact's Review Metadata aligned to its latest verified pass.",
                 "- [ ] Mention every in-scope requirement ID explicitly in `Traceability` and use `None because ...` if no prior recursive evidence applies.",
                 "- [ ] Do not lock while any placeholder or example text remains.",
                 "",
@@ -2723,7 +2765,7 @@ class BenchmarkHarness:
                 "- None because this benchmark run starts from a fresh disposable workspace and no earlier `.recursive/run/...` or `.recursive/memory/...` path is relevant.",
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 phase1_requirement_lines(),
                 [
                     f".recursive/run/{run_id}/00-requirements.md",
@@ -2731,7 +2773,6 @@ class BenchmarkHarness:
                     "benchmark/benchmark-context.json",
                     "benchmark/expected-product-root.txt",
                 ],
-                "Draft scaffold only; baseline analysis and blocking evidence still need to be filled in. When the phase is otherwise complete, keep `Gaps Found` limited to actual audit defects; expected starter gaps belong in the baseline findings and requirement status instead.",
             )
         )
 
@@ -2791,6 +2832,10 @@ class BenchmarkHarness:
                 "",
                 "- TODO record any merged or indirect coverage decisions and explain why they are lossless.",
                 "",
+                "## Test Surface",
+                "",
+                *test_surface_lines(),
+                "",
                 "## Traceability",
                 "",
                 *traceability_lines("link the planned files, test strategy, and QA plan back to this requirement."),
@@ -2800,14 +2845,13 @@ class BenchmarkHarness:
                 "- None because only the current run baseline is relevant and there is no earlier durable recursive evidence path to cite.",
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 phase2_status_lines(),
                 [
                     f".recursive/run/{run_id}/00-requirements.md",
                     f".recursive/run/{run_id}/01-as-is.md",
                     ".recursive/RECURSIVE.md",
                 ],
-                "Draft scaffold only; planned implementation, verification, and QA surfaces still need real paths.",
             )
         )
 
@@ -2837,6 +2881,7 @@ class BenchmarkHarness:
                 "## TDD Compliance Log",
                 "",
                 "- TDD Mode: pragmatic",
+                f"- Test Surface: {', '.join(f'TS-{index:03d}' for index in range(1, 1 + sum(len(spec.acceptance_criteria) for spec in specs)))}",
                 "- Summary: TODO replace with the actual TDD approach used in this run.",
                 "TDD Compliance: FAIL",
                 "",
@@ -2858,14 +2903,13 @@ class BenchmarkHarness:
                 *traceability_lines("tie the implemented work back to exact changed files and implementation evidence."),
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 implemented_status_lines(),
                 [
                     f".recursive/run/{run_id}/02-to-be-plan.md",
                     f".recursive/run/{run_id}/01-as-is.md",
                     ".recursive/RECURSIVE.md",
                 ],
-                "Draft scaffold only; implementation receipts and evidence paths still need real values.",
             )
         )
 
@@ -2930,14 +2974,13 @@ class BenchmarkHarness:
                 "- None because the current run artifacts provide the required evidence and no earlier recursive run or memory path was needed.",
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 verified_status_lines(),
                 [
                     f".recursive/run/{run_id}/03-implementation-summary.md",
                     f".recursive/run/{run_id}/02-to-be-plan.md",
                     ".recursive/RECURSIVE.md",
                 ],
-                "Draft scaffold only; exact command output and verification evidence still need real values.",
             )
         )
 
@@ -3028,14 +3071,13 @@ class BenchmarkHarness:
                 *traceability_lines("connect the decisions delta back to verified implementation and verification evidence."),
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 verified_status_lines(),
                 [
                     f".recursive/run/{run_id}/04-test-summary.md",
                     ".recursive/DECISIONS.md",
                     ".recursive/RECURSIVE.md",
                 ],
-                "Draft scaffold only; decisions delta and verified closeout evidence still need real values.",
             )
         )
 
@@ -3077,14 +3119,13 @@ class BenchmarkHarness:
                 "- None because no earlier recursive run or memory path was reviewed beyond the current benchmark run state.",
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 verified_status_lines(),
                 [
                     f".recursive/run/{run_id}/06-decisions-update.md",
                     ".recursive/STATE.md",
                     ".recursive/RECURSIVE.md",
                 ],
-                "Draft scaffold only; state delta and verified closeout evidence still need real values.",
             )
         )
 
@@ -3162,14 +3203,13 @@ class BenchmarkHarness:
                 "- None because no earlier recursive run or memory path was reviewed beyond the current benchmark run state.",
                 "",
             ]
-            + audit_sections(
+            + review_sections(
                 verified_status_lines(),
                 [
                     f".recursive/run/{run_id}/07-state-update.md",
                     ".recursive/memory/MEMORY.md",
                     ".recursive/RECURSIVE.md",
                 ],
-                "Draft scaffold only; memory review and skill-promotion conclusions still need real values.",
             )
         )
 
@@ -3333,69 +3373,6 @@ class BenchmarkHarness:
                 return False
         return saw_optional_warning
 
-    def reconcile_pragmatic_tdd_exception_field(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any(
-            marker in finding
-            for marker in (
-                "Pragmatic TDD Exception is missing Compensating validation",
-                "Pragmatic TDD compensating evidence path(s) do not exist",
-            )
-            for finding in lint_findings
-        ):
-            return False
-        artifact_path = repo_root / ".recursive" / "run" / result.run_id / "03-implementation-summary.md"
-        if not artifact_path.exists():
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        replacement_value = (
-            f"See `.recursive/run/{result.run_id}/evidence/logs/green/build.log`, "
-            f"`.recursive/run/{result.run_id}/evidence/logs/green/test.log`, and "
-            f"`.recursive/run/{result.run_id}/evidence/logs/green/preview.log`."
-        )
-        inline_match = re.search(r"(?mi)^([ \t]*-\s*Compensating validation:\s*)(.*?)\s*$", original)
-        if inline_match:
-            current_value = inline_match.group(2).strip()
-            current_paths = [path for path in self.extract_cited_paths(current_value) if (repo_root / path).exists()]
-            if current_paths and "replace-me" not in current_value.lower():
-                return False
-            updated_inline = re.sub(
-                r"(?mi)^([ \t]*-\s*Compensating validation:\s*)(.*?)\s*$",
-                rf"\1{replacement_value}",
-                original,
-                count=1,
-            )
-            artifact_path.write_text(updated_inline, encoding="utf-8", newline="\n")
-            return True
-        updated_inline, inline_count = re.subn(
-            r"(?mi)^([ \t]*-\s*Compensating validation:\s*)$",
-            rf"\1{replacement_value}",
-            original,
-            count=1,
-        )
-        if inline_count:
-            artifact_path.write_text(updated_inline, encoding="utf-8", newline="\n")
-            return True
-        exception_body = self.get_heading_body(original, "Pragmatic TDD Exception")
-        if not exception_body:
-            return False
-        subsection_match = re.search(r"(?mi)^[ \t]*###\s+Compensating validation\s*$", exception_body)
-        if not subsection_match:
-            return False
-        normalized_body = re.sub(
-            r"(?mi)^([ \t]*###\s+Compensating validation\s*$)",
-            rf"- Compensating validation: {replacement_value}\n\n\1",
-            exception_body,
-            count=1,
-        )
-        if normalized_body == exception_body:
-            return False
-        updated = original.replace(exception_body, normalized_body, 1)
-        artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-        return True
-
     def should_attempt_recursive_repair(self, result: ArmResult) -> bool:
         return result.arm_name == "recursive-on" and result.recursive_workflow_status in {
             "incomplete",
@@ -3491,7 +3468,7 @@ class BenchmarkHarness:
                 "- Delegated roles may propose fixes, but the orchestrator stays responsible for the audit-repair loop: re-check their output, correct anything incomplete or inconsistent, and continue until strict recursive lint would pass.",
                 "- Do not hand off final gate ownership. The orchestrator must make sure every required artifact, audit field, lock field, diff citation, and approval gate is satisfied before finishing.",
                 "- Keep the template headings exactly as required, including `## TODO`, `## Changes Applied`, and `## Failures and Diagnostics (if any)`.",
-                "- Use the exact word `None` in `## Gaps Found` whenever `Audit: PASS` is true and there are no unresolved gaps. `No gaps` is not sufficient for strict lint.",
+                "- For every audited phase, generate the canonical immutable review bundle, maintain the canonical ledger, and keep all six `Review Metadata` fields—including `Review Ledger Path` and `Review Bundle Path`—aligned to the latest controller-verified whole-ledger PASS.",
                 "- If you use `TDD Mode: pragmatic`, include a real `Compensating validation:` field with concrete evidence-file citations. Do not turn `Compensating validation` into its own heading.",
                 "- In `04-test-summary.md` and later audited phases, `Verification Evidence` must be distinct from the Phase 3 implementation evidence.",
                 "- In `Changed Files`, `Worktree Diff Audit`, and `Requirement Completion Status`, account for final diff-owned benchmark files and bootstrapped control-plane files under the worktree, not just the main product source files.",
@@ -3522,13 +3499,6 @@ class BenchmarkHarness:
             return None
         if not self.should_attempt_recursive_repair(result) or not result.run_id:
             return None
-        preflight_changed = self.reconcile_recursive_closeout_artifacts(repo_root, logs_root, result)
-        if preflight_changed:
-            self.evaluate_recursive_run(repo_root, logs_root, result)
-            if self.should_attempt_recursive_repair(result):
-                self.evaluate_recursive_run(repo_root, logs_root, result)
-            if not self.should_attempt_recursive_repair(result):
-                return None
         total_duration = 0.0
         last_record: CommandResult | None = None
         attempt = 1
@@ -3554,7 +3524,6 @@ class BenchmarkHarness:
             result.log_paths["recursive_repair_stdout"] = self.rel(stdout_log)
             result.log_paths["recursive_repair_stderr"] = self.rel(stderr_log)
             self.evaluate_recursive_run(repo_root, logs_root, result)
-            self.reconcile_recursive_closeout_artifacts(repo_root, logs_root, result)
             attempt += 1
         result.phase_durations["recursive_repair"] = round(total_duration, 2)
         if last_record is not None and self.should_attempt_recursive_repair(result):
@@ -3968,249 +3937,20 @@ class BenchmarkHarness:
             entries.append(fields)
         return entries
 
-    @staticmethod
-    def normalize_changed_files_field(field_value: str, diff_paths: set[str]) -> tuple[str, bool]:
-        cited_paths = re.findall(r"`([^`\r\n]+)`", field_value)
-        if not cited_paths:
-            return field_value, False
-        kept_paths = [path for path in cited_paths if normalize_benchmark_path(path) in diff_paths]
-        if kept_paths == cited_paths:
-            return field_value, False
-        return ", ".join(f"`{path}`" for path in kept_paths), True
 
     @staticmethod
     def extract_cited_paths(field_value: str) -> list[str]:
         return [normalize_benchmark_path(path) for path in re.findall(r"`([^`\r\n]+)`", field_value)]
 
-    @staticmethod
-    def format_cited_paths(paths: list[str]) -> str:
-        return ", ".join(f"`{path}`" for path in dedupe_preserve_order(paths))
 
-    @staticmethod
-    def rewrite_field_artifact_aliases(field_value: str, alias_map: dict[str, str]) -> tuple[str, bool]:
-        changed = False
 
-        def replace(match: re.Match[str]) -> str:
-            nonlocal changed
-            raw_value = match.group(1).strip()
-            mapped = alias_map.get(raw_value)
-            if not mapped:
-                return match.group(0)
-            changed = True
-            return f"`{mapped}`"
 
-        updated = re.sub(r"`([^`\r\n]+)`", replace, field_value)
-        return updated, changed
 
-    @staticmethod
-    def get_markdown_field_value(section_body: str, field_name: str) -> str | None:
-        match = re.search(rf"(?mi)^[ \t]*-\s*{re.escape(field_name)}:\s*(.*?)\s*$", section_body)
-        if not match:
-            return None
-        return match.group(1).strip()
 
-    @staticmethod
-    def replace_markdown_field_value(section_body: str, field_name: str, new_value: str) -> tuple[str, bool]:
-        pattern = re.compile(rf"(?mi)^([ \t]*-\s*{re.escape(field_name)}:\s*)(.*?)\s*$")
-        updated, count = pattern.subn(rf"\1{new_value}", section_body, count=1)
-        return updated, count > 0
 
-    @staticmethod
-    def replace_heading_body(content: str, heading_text: str, new_body: str) -> str:
-        match = re.search(
-            rf"(?ms)(^[ \t]*##\s+{re.escape(heading_text)}\s*$\n?)(.*?)(?=^[ \t]*##\s+|\Z)",
-            content,
-        )
-        if not match:
-            return content
-        return content[: match.start(2)] + new_body.strip() + "\n\n" + content[match.end(2) :]
 
-    @staticmethod
-    def upsert_heading_body(content: str, heading_text: str, new_body: str, before_heading: str | None = None) -> str:
-        updated = BenchmarkHarness.replace_heading_body(content, heading_text, new_body)
-        if updated != content:
-            return updated
-        block = f"## {heading_text}\n\n{new_body.strip()}\n\n"
-        if before_heading:
-            match = re.search(rf"(?m)^[ \t]*##\s+{re.escape(before_heading)}\s*$", content)
-            if match:
-                return content[: match.start()] + block + content[match.start() :]
-        suffix = "" if not content.rstrip() else "\n\n"
-        return content.rstrip() + suffix + block
 
-    @staticmethod
-    def is_meaningful_markdown_value(value: str | None) -> bool:
-        if value is None:
-            return False
-        normalized = value.strip().strip("`").strip().lower()
-        return bool(normalized) and normalized not in {"none", "n/a", "todo", "tbd", "..."}
 
-    @staticmethod
-    def normalize_source_text(value: str) -> str:
-        return re.sub(r"\s+", " ", value.strip().strip("`")).lower()
-
-    def current_run_artifact_aliases(self, result: ArmResult) -> dict[str, str]:
-        if not result.run_id:
-            return {}
-        run_prefix = f".recursive/run/{result.run_id}"
-        return {name: f"{run_prefix}/{name}" for name in REQUIRED_RECURSIVE_RUN_FILES}
-
-    def default_requirement_verification_paths(
-        self,
-        repo_root: Path,
-        result: ArmResult,
-        artifact_name: str,
-        requirement_id: str,
-    ) -> list[str]:
-        if not result.run_id:
-            return []
-        run_prefix = f".recursive/run/{result.run_id}"
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        screenshot_dir = run_root / "evidence" / "screenshots"
-
-        def existing(relative_path: str) -> str | None:
-            normalized = normalize_benchmark_path(relative_path)
-            return normalized if (repo_root / normalized).exists() else None
-
-        if artifact_name == "04-test-summary.md":
-            screenshot_paths = [
-                normalize_benchmark_path(str(path.relative_to(repo_root)))
-                for path in sorted(screenshot_dir.glob("*"))
-                if path.is_file()
-            ]
-            manual_qa = existing(f"{run_prefix}/05-manual-qa.md")
-            if requirement_id == "R6":
-                return [
-                    path
-                    for path in (
-                        existing(f"{run_prefix}/evidence/logs/green/test.log"),
-                        existing(f"{run_prefix}/evidence/logs/green/build.log"),
-                        existing(f"{run_prefix}/evidence/logs/green/preview.log"),
-                    )
-                    if path
-                ]
-            if requirement_id == "R5" and screenshot_paths:
-                return screenshot_paths[:3]
-            test_log = existing(f"{run_prefix}/evidence/logs/green/test.log")
-            verification_paths = [path for path in (test_log, manual_qa) if path]
-            if not verification_paths and screenshot_paths:
-                if screenshot_paths:
-                    verification_paths = screenshot_paths[:1]
-            return verification_paths
-
-        return [
-            path
-            for path in (
-                existing(f"{run_prefix}/04-test-summary.md"),
-                existing(f"{run_prefix}/05-manual-qa.md"),
-            )
-            if path
-        ]
-
-    def phase2_requirement_surfaces(self, repo_root: Path, result: ArmResult) -> dict[str, list[str]]:
-        if not result.run_id:
-            return {}
-        artifact_path = repo_root / ".recursive" / "run" / result.run_id / "02-to-be-plan.md"
-        if not artifact_path.exists():
-            return {}
-        requirement_mapping = self.get_heading_body(
-            artifact_path.read_text(encoding="utf-8", errors="replace"),
-            "Requirement Mapping",
-        )
-        surfaces: dict[str, list[str]] = {}
-        for entry in self.parse_pipe_entry_fields(requirement_mapping):
-            requirement_id = entry.get("Requirement ID", "")
-            if not requirement_id:
-                continue
-            paths = [
-                path
-                for path in self.extract_cited_paths(entry.get("Implementation Surface", ""))
-                if (repo_root / path).exists()
-            ]
-            if paths:
-                surfaces[requirement_id] = dedupe_preserve_order(paths)
-        return surfaces
-
-    def requirement_changed_files_by_id(self, repo_root: Path, result: ArmResult, diff_paths: set[str]) -> dict[str, list[str]]:
-        grouped: dict[str, list[str]] = {spec.requirement_id: [] for spec in self.benchmark_requirement_specs()}
-        candidate_paths = self.benchmark_product_diff_paths(repo_root, result, diff_paths)
-        for path in candidate_paths:
-            requirement_id = self.preferred_requirement_for_changed_path(path)
-            grouped.setdefault(requirement_id, []).append(path)
-        if not candidate_paths:
-            return grouped
-        fallback_surfaces = self.benchmark_requirement_surfaces(repo_root, result, diff_paths)
-        for requirement_id, paths in fallback_surfaces.items():
-            if not grouped.get(requirement_id):
-                grouped[requirement_id] = list(paths)
-        return {key: dedupe_preserve_order(value) for key, value in grouped.items()}
-
-    def render_verified_requirement_status_lines(
-        self,
-        repo_root: Path,
-        result: ArmResult,
-        diff_paths: set[str],
-        implementation_evidence: list[str],
-        verification_artifact_name: str,
-        audit_note: str,
-    ) -> list[str]:
-        if not result.run_id:
-            return []
-        implementation_paths = dedupe_preserve_order(implementation_evidence)
-        requirement_changed = self.requirement_changed_files_by_id(repo_root, result, diff_paths)
-        lines: list[str] = []
-        for spec in self.benchmark_requirement_specs():
-            changed_files = requirement_changed.get(spec.requirement_id) or []
-            verification_paths = self.default_requirement_verification_paths(
-                repo_root,
-                result,
-                verification_artifact_name,
-                spec.requirement_id,
-            )
-            if not verification_paths:
-                verification_paths = [f".recursive/run/{result.run_id}/04-test-summary.md"]
-            lines.append(
-                f"- {spec.requirement_id} | Status: verified | "
-                f"Changed Files: {self.format_cited_paths(changed_files)} | "
-                f"Implementation Evidence: {self.format_cited_paths(implementation_paths)} | "
-                f"Verification Evidence: {self.format_cited_paths(verification_paths)} | "
-                f"Audit Note: {audit_note}"
-            )
-        return lines
-
-    def build_closeout_traceability_lines(self, result: ArmResult, phase_summary: str) -> list[str]:
-        if not result.run_id:
-            return []
-        test_summary = f".recursive/run/{result.run_id}/04-test-summary.md"
-        manual_qa = f".recursive/run/{result.run_id}/05-manual-qa.md"
-        return [
-            f"- {spec.requirement_id} -> `{test_summary}` and `{manual_qa}` remain the verified closeout evidence; {phase_summary}"
-            for spec in self.benchmark_requirement_specs()
-        ]
-
-    def finalize_locked_artifact(self, content: str) -> str:
-        locked_at = timestamp_utc()
-        updated = re.sub(r"(?m)^Status: `[^`]+`$", "Status: `LOCKED`", content, count=1)
-        if re.search(r"(?m)^LockedAt:", updated):
-            updated = re.sub(r"(?m)^LockedAt:.*$", f"LockedAt: `{locked_at}`", updated, count=1)
-        else:
-            updated = re.sub(
-                r"(?m)^(Scope note:.*)$",
-                rf"\1\nLockedAt: `{locked_at}`",
-                updated,
-                count=1,
-            )
-        if re.search(r"(?m)^LockHash:", updated):
-            updated = re.sub(r"(?m)^LockHash:.*$", f"LockHash: `{'0' * 64}`", updated, count=1)
-        else:
-            updated = re.sub(
-                r"(?m)^LockedAt:.*$",
-                rf"\g<0>\nLockHash: `{'0' * 64}`",
-                updated,
-                count=1,
-            )
-        lock_hash = lock_hash_from_content(updated)
-        return re.sub(r"(?m)^LockHash:.*$", f"LockHash: `{lock_hash}`", updated, count=1)
 
     def ensure_recursive_evidence_layout(self, run_root: Path) -> None:
         evidence_root = run_root / "evidence"
@@ -4226,1889 +3966,33 @@ class BenchmarkHarness:
         ):
             path.mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def is_test_product_path(path: str) -> bool:
-        lowered = normalize_benchmark_path(path).lower()
-        return (
-            lowered.endswith((".test.ts", ".test.tsx"))
-            or lowered.endswith("/test-setup.ts")
-            or lowered.endswith("/test_setup.ts")
-            or "/__tests__/" in lowered
-        )
 
-    def benchmark_product_diff_paths(self, repo_root: Path, result: ArmResult, diff_paths: set[str]) -> list[str]:
-        if not result.run_id:
-            return []
-        product_root = normalize_benchmark_path(result.expected_product_root or f".worktrees/{result.run_id}")
-        product_prefix = product_root + "/"
-
-        def worktree_product_path(path: str) -> bool:
-            normalized = normalize_benchmark_path(path)
-            if not normalized or (normalized != product_root and not normalized.startswith(product_prefix)):
-                return False
-            relative = normalized[len(product_prefix) :] if normalized.startswith(product_prefix) else ""
-            if not relative:
-                return False
-            relative_lower = relative.lower()
-            if relative_lower in {".gitignore", "benchmark/agent-log.md"}:
-                return True
-            relative_parts = [part.lower() for part in relative.split("/") if part]
-            if any(part in IGNORED_SOURCE_DIRS or part in TRANSIENT_RUNTIME_DIR_MARKERS for part in relative_parts[:-1]):
-                return False
-            relative_path = Path(relative)
-            if relative_path.name in EXPLICIT_PRODUCT_FILE_NAMES:
-                return True
-            return relative_path.suffix.lower() in self.source_extensions()
-
-        product_paths = [
-            path
-            for path in sorted(diff_paths)
-            if worktree_product_path(path)
+    def benchmark_acceptance_seam(self, criterion: str) -> str:
+        lowered = criterion.lower()
+        commands = re.findall(r"`([^`]+)`", criterion)
+        executable_commands = [
+            command
+            for command in commands
+            if command.startswith(("cargo ", "npm ", "trunk "))
         ]
-        if product_paths:
-            return dedupe_preserve_order(product_paths)
-        fallback_paths: list[str] = []
-        for raw_path in result.recursive_product_change_paths:
-            normalized = normalize_benchmark_path(raw_path)
-            if not normalized:
-                continue
-            if product_root and normalized != product_root and not normalized.startswith(product_prefix):
-                normalized = f"{product_root}/{normalized.lstrip('/')}"
-            if worktree_product_path(normalized):
-                fallback_paths.append(normalized)
-        return dedupe_preserve_order(fallback_paths)
+        if executable_commands:
+            return "command boundary: " + ", ".join(f"`{command}`" for command in executable_commands)
+        if re.search(r"\bautomated tests?\b", lowered):
+            test_command = self.test_command()
+            executable = Path(test_command[0]).name
+            executable = re.sub(r"(?i)\.(?:exe|cmd|bat)$", "", executable)
+            stable_test_command = [executable, *test_command[1:]]
+            return f"command boundary: `{command_string(stable_test_command)}`"
+        if re.search(r"\b(?:import|export)(?:ed|ing)?\b|\bjson\b", lowered):
+            return "browser file import/export boundary and visible validation state"
+        if any(marker in lowered for marker in ("reload", "persist", "local storage", "sample data", "reset")):
+            return "browser reload boundary and browser-local persisted state"
+        if "keyboard" in lowered or "backspace" in lowered or "escape" in lowered:
+            return "browser keyboard-event boundary and visible application state"
+        return "browser UI interaction and visible rendered state"
 
-    def benchmark_requirement_surfaces(
-        self,
-        repo_root: Path,
-        result: ArmResult,
-        diff_paths: set[str],
-    ) -> dict[str, list[str]]:
-        product_paths = self.benchmark_product_diff_paths(repo_root, result, diff_paths)
-        existing_surfaces = self.phase2_requirement_surfaces(repo_root, result)
-        product_root = normalize_benchmark_path(result.expected_product_root or f".worktrees/{result.run_id}") if result.run_id else ""
-        product_prefix = product_root + "/" if product_root else ""
-        surfaces: dict[str, list[str]] = {
-            spec.requirement_id: [
-                path
-                for path in existing_surfaces.get(spec.requirement_id, [])
-                if self.is_product_path(path) and (not product_root or path == product_root or path.startswith(product_prefix))
-            ]
-            for spec in self.benchmark_requirement_specs()
-        }
-        if not product_paths:
-            return {key: dedupe_preserve_order(value) for key, value in surfaces.items()}
 
-        grouped: dict[str, list[str]] = {}
-        for path in product_paths:
-            grouped.setdefault(self.preferred_requirement_for_changed_path(path), []).append(path)
 
-        app_paths = [path for path in product_paths if path.lower().endswith("/app.tsx")]
-        storage_paths = [path for path in product_paths if path.lower().endswith("/storage.ts")]
-        style_paths = [path for path in product_paths if path.lower().endswith("/styles.css")]
-        test_paths = [path for path in product_paths if self.is_test_product_path(path)]
-        non_test_paths = [path for path in product_paths if not self.is_test_product_path(path)]
-        shared_paths = non_test_paths or product_paths
-        preferred_map = {
-            "R1": grouped.get("R1", []) + app_paths,
-            "R2": grouped.get("R2", []) + app_paths,
-            "R3": grouped.get("R3", []) + storage_paths + app_paths,
-            "R4": grouped.get("R4", []) + storage_paths + app_paths,
-            "R5": grouped.get("R5", []) + style_paths + app_paths,
-            "R6": grouped.get("R6", []) + test_paths + shared_paths,
-        }
-        for requirement_id, default_paths in preferred_map.items():
-            combined = dedupe_preserve_order([*surfaces.get(requirement_id, []), *default_paths])
-            if not combined:
-                combined = list(shared_paths)
-            surfaces[requirement_id] = combined
-        return {key: dedupe_preserve_order(value) for key, value in surfaces.items()}
-
-    def benchmark_requirement_plan_surfaces(
-        self,
-        repo_root: Path,
-        result: ArmResult,
-        diff_paths: set[str],
-    ) -> dict[str, dict[str, list[str]]]:
-        assert result.run_id
-        run_id = result.run_id
-        run_prefix = f".recursive/run/{run_id}"
-        run_root = repo_root / ".recursive" / "run" / run_id
-
-        def existing(relative_path: str) -> str | None:
-            normalized = normalize_benchmark_path(relative_path)
-            return normalized if (repo_root / normalized).exists() else None
-
-        screenshot_paths = [
-            normalize_benchmark_path(str(path.relative_to(repo_root)))
-            for path in sorted((run_root / "evidence" / "screenshots").glob("*"))
-            if path.is_file()
-        ]
-        qa_paths = screenshot_paths[:3] or [
-            path
-            for path in (
-                existing(f"{run_prefix}/evidence/manual/qa-summary.txt"),
-                existing(f"{run_prefix}/evidence/logs/green/preview.log"),
-            )
-            if path
-        ]
-        verification_fallback = [
-            path
-            for path in (
-                existing(f"{run_prefix}/evidence/logs/green/test.log"),
-                existing(f"{run_prefix}/evidence/logs/green/build.log"),
-                existing(f"{run_prefix}/evidence/logs/green/preview.log"),
-            )
-            if path
-        ]
-        implementation_surfaces = self.benchmark_requirement_surfaces(repo_root, result, diff_paths)
-        plan_surfaces: dict[str, dict[str, list[str]]] = {}
-        for spec in self.benchmark_requirement_specs():
-            verification_paths = self.default_requirement_verification_paths(
-                repo_root,
-                result,
-                "04-test-summary.md",
-                spec.requirement_id,
-            )
-            if not verification_paths:
-                verification_paths = list(verification_fallback or qa_paths)
-            plan_surfaces[spec.requirement_id] = {
-                "implementation": list(implementation_surfaces.get(spec.requirement_id) or verification_fallback or qa_paths),
-                "verification": list(verification_paths),
-                "qa": list(qa_paths or verification_paths or implementation_surfaces.get(spec.requirement_id, [])),
-            }
-        return plan_surfaces
-
-    @staticmethod
-    def benchmark_path_summary(path: str) -> str:
-        lowered = normalize_benchmark_path(path).lower()
-        if lowered.endswith("/app.tsx"):
-            return "Planner UI, workflow state changes, and browser-only interactions."
-        if lowered.endswith("/styles.css"):
-            return "Visual polish, empty-state styling, and finished browser presentation."
-        if lowered.endswith("/app.test.tsx"):
-            return "Automated verification coverage for the delivered planner behavior."
-        if lowered.endswith("/storage.ts"):
-            return "Local persistence and recovery behavior."
-        return "Final benchmark-owned product surface touched by the delivered implementation."
-
-    def render_audited_worktree_diff_body(self, baseline_commit: str, diff_paths: set[str]) -> str:
-        reviewed_paths = "\n".join(f"  - `{path}`" for path in sorted(diff_paths)) or "  - None."
-        return "\n".join(
-            [
-                "- Baseline type: commit",
-                f"- Baseline reference: `{baseline_commit}`",
-                "- Comparison reference: working-tree",
-                f"- Normalized baseline: `{baseline_commit}`",
-                "- Normalized comparison: working-tree",
-                f"- Normalized diff command: `git diff --name-only {baseline_commit}`",
-                "- Actual changed files reviewed:",
-                reviewed_paths,
-                "- Unexplained drift: none.",
-            ]
-        )
-
-    def render_phase2_artifact(self, repo_root: Path, result: ArmResult, diff_paths: set[str]) -> str:
-        assert result.run_id
-        run_id = result.run_id
-        baseline_commit = self.read_recursive_lint_baseline_ref(repo_root, result) or "HEAD"
-        content = self.render_recursive_template_files(
-            run_id,
-            result.expected_product_root or f".worktrees/{run_id}",
-            baseline_commit,
-        )["02-to-be-plan.md"]
-        plan_surfaces = self.benchmark_requirement_plan_surfaces(repo_root, result, diff_paths)
-        changed_paths = self.benchmark_product_diff_paths(repo_root, result, diff_paths)
-        audit_note = (
-            "Controller synthesized this executable plan from the completed benchmark workspace after recursive planning timed out."
-        )
-        planned_changes = "\n".join(
-            f"- `{path}` -> {self.benchmark_path_summary(path)}"
-            for path in changed_paths
-        ) or "- No changed product files were available when the controller synthesized this plan."
-        mapping_lines: list[str] = []
-        status_lines: list[str] = []
-        traceability_lines: list[str] = []
-        for spec in self.benchmark_requirement_specs():
-            surfaces = plan_surfaces.get(spec.requirement_id, {})
-            implementation_paths = surfaces.get("implementation", [])
-            verification_paths = surfaces.get("verification", [])
-            qa_paths = surfaces.get("qa", [])
-            mapping_lines.append(
-                f"- {spec.requirement_id} | Source Quote: {spec.source_quote} | Coverage: direct | "
-                f"Implementation Surface: {self.format_cited_paths(implementation_paths)} | "
-                f"Verification Surface: {self.format_cited_paths(verification_paths)} | "
-                f"QA Surface: {self.format_cited_paths(qa_paths)}"
-            )
-            status_lines.append(
-                f"- {spec.requirement_id} | Status: planned | "
-                f"Implementation Surface: {self.format_cited_paths(implementation_paths)} | "
-                f"Verification Surface: {self.format_cited_paths(verification_paths)} | "
-                f"QA Surface: {self.format_cited_paths(qa_paths)} | Audit Note: {audit_note}"
-            )
-            traceability_lines.append(
-                f"- {spec.requirement_id} -> Planned implementation uses {self.format_cited_paths(implementation_paths)}, "
-                f"verification uses {self.format_cited_paths(verification_paths)}, and QA uses {self.format_cited_paths(qa_paths)}."
-            )
-        content = self.replace_heading_body(
-            content,
-            "TODO",
-            "\n".join(
-                [
-                    "- [x] Use only final repo-root-relative product and evidence paths.",
-                    "- [x] Keep Phase 2 requirement statuses limited to Implementation/Verification/QA surfaces.",
-                    "- [x] Replace placeholder planning notes with the controller-derived benchmark execution plan.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Planned Changes by File", planned_changes)
-        content = self.replace_heading_body(content, "Requirement Mapping", "\n".join(mapping_lines))
-        content = self.replace_heading_body(
-            content,
-            "Implementation Steps",
-            "\n".join(
-                [
-                    "- 1. Finalize the planner UI and local-first state flows in the worktree product files cited above.",
-                    "- 2. Validate the delivered app with the existing Vitest/build/preview workflow and capture benchmark screenshots.",
-                    "- 3. Close the audited recursive receipts with only current-run evidence paths.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Testing Strategy",
-            "\n".join(
-                [
-                    "- `npm install` to restore workspace dependencies before verification.",
-                    "- `npm run build` and `npm run test` to produce green evidence under the current run log directory.",
-                    "- `npm run preview --host 127.0.0.1 --port <benchmark-assigned-port>` plus benchmark screenshots for browser validation.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Playwright Plan (if applicable)",
-            "- Not applicable for this benchmark run; verification uses the existing Vitest suite, preview logs, and benchmark screenshots.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Manual QA Scenarios",
-            "\n".join(
-                [
-                    "- Validate empty-state rendering and finished visual polish.",
-                    "- Validate loaded planner interactions plus search/filter review flows.",
-                    "- Validate preview availability, persistence behavior, and portability actions from the delivered UI.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Idempotence and Recovery",
-            "\n".join(
-                [
-                    "- Re-run `npm install`, `npm run build`, and `npm run test` if the workspace or dependencies drift.",
-                    "- Re-run the preview command and benchmark screenshot capture if browser evidence needs to be refreshed.",
-                    "- Keep all evidence under the current `/.recursive/run/.../evidence/` tree so the plan remains reproducible.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Implementation Sub-phases",
-            "\n".join(
-                [
-                    "- SP1: finalize planner UI and local-first workflow behavior.",
-                    "- SP2: execute automated build/test verification and preview smoke coverage.",
-                    "- SP3: reconcile audited recursive artifacts against the final worktree evidence.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Plan Drift Check",
-            "- The controller synthesized this plan from the final changed worktree paths after timeout; repeated surfaces across requirements are intentional because the delivered planner behavior is concentrated in a small file set.",
-        )
-        content = self.replace_heading_body(content, "Traceability", "\n".join(traceability_lines))
-        content = self.replace_heading_body(
-            content,
-            "Audit Context",
-            "\n".join(
-                [
-                    "- Audit Execution Mode: self-audit",
-                    "- Subagent Availability: unavailable",
-                    "- Subagent Capability Probe: Benchmark controller synthesized this audited planning artifact because no durable delegated subagent facility is available in the disposable benchmark workspace.",
-                    "- Delegation Decision Basis: Self-audit is faster and more reliable than another routed repair pass for controller-known benchmark planning structure.",
-                    "- Audit Inputs Provided:",
-                    f"  - `.recursive/run/{run_id}/00-requirements.md`",
-                    f"  - `.recursive/run/{run_id}/01-as-is.md`",
-                    "  - `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Effective Inputs Re-read",
-            "\n".join(
-                [
-                    f"- `.recursive/run/{run_id}/00-requirements.md`",
-                    f"- `.recursive/run/{run_id}/01-as-is.md`",
-                    "- `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Earlier Phase Reconciliation",
-            "- The controller re-read the benchmark requirements, baseline analysis, and current worktree evidence to synthesize a lock-valid Phase 2 plan after the recursive agent timed out.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Subagent Contribution Verification",
-            "\n".join(
-                [
-                    "- Reviewed Action Records: none",
-                    f"- Main-Agent Verification Performed: `.recursive/run/{run_id}/00-requirements.md`, `.recursive/run/{run_id}/01-as-is.md`, `.recursive/RECURSIVE.md`, and the final worktree diff/evidence logs.",
-                    "- Acceptance Decision: accepted",
-                    "- Refresh Handling: none",
-                    "- Repair Performed After Verification: controller synthesized the missing planning receipt from the finished benchmark workspace.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Worktree Diff Audit", self.render_audited_worktree_diff_body(baseline_commit, diff_paths))
-        content = self.replace_heading_body(content, "Gaps Found", "- None.")
-        content = self.replace_heading_body(
-            content,
-            "Repair Work Performed",
-            "- Controller synthesized this missing Phase 2 benchmark artifact from the final worktree diff and current-run evidence after the routed closeout timed out.",
-        )
-        content = self.replace_heading_body(content, "Requirement Completion Status", "\n".join(status_lines))
-        content = re.sub(
-            r"(?ms)^## Audit Verdict\s+.*?(?=^## Coverage Gate)",
-            "## Audit Verdict\n\nAudit: PASS\n- Summary: Controller-synthesized Phase 2 plan now cites the finished benchmark surfaces and current-run evidence.\n\n",
-            content,
-            count=1,
-        )
-        content = re.sub(r"(?m)^Coverage: FAIL$", "Coverage: PASS", content, count=1)
-        content = re.sub(r"(?m)^Approval: FAIL$", "Approval: PASS", content, count=1)
-        return self.finalize_locked_artifact(content)
-
-    def render_phase3_artifact(self, repo_root: Path, result: ArmResult, diff_paths: set[str]) -> str:
-        assert result.run_id
-        run_id = result.run_id
-        baseline_commit = self.read_recursive_lint_baseline_ref(repo_root, result) or "HEAD"
-        content = self.render_recursive_template_files(
-            run_id,
-            result.expected_product_root or f".worktrees/{run_id}",
-            baseline_commit,
-        )["03-implementation-summary.md"]
-        plan_surfaces = self.benchmark_requirement_plan_surfaces(repo_root, result, diff_paths)
-        implementation_evidence = [
-            path
-            for path in (
-                f".recursive/run/{run_id}/evidence/logs/green/build.log",
-                f".recursive/run/{run_id}/evidence/logs/green/test.log",
-                f".recursive/run/{run_id}/evidence/logs/green/preview.log",
-            )
-            if (repo_root / path).exists()
-        ]
-        changed_paths = self.benchmark_product_diff_paths(repo_root, result, diff_paths)
-        changes_applied = "\n".join(
-            f"- `{path}` -> {self.benchmark_path_summary(path)}"
-            for path in changed_paths
-        ) or "- No changed product files were available when the controller synthesized this implementation receipt."
-        traceability_lines: list[str] = []
-        requirement_lines: list[str] = []
-        for spec in self.benchmark_requirement_specs():
-            requirement_paths = plan_surfaces.get(spec.requirement_id, {}).get("implementation", [])
-            merged_evidence = dedupe_preserve_order([*requirement_paths, *implementation_evidence])
-            traceability_lines.append(
-                f"- {spec.requirement_id} -> Implemented in {self.format_cited_paths(requirement_paths)} with current-run evidence in {self.format_cited_paths(implementation_evidence)}."
-            )
-            requirement_lines.append(
-                f"- {spec.requirement_id} | Status: implemented | "
-                f"Changed Files: {self.format_cited_paths(requirement_paths)} | "
-                f"Implementation Evidence: {self.format_cited_paths(merged_evidence)} | "
-                "Audit Note: Controller synthesized this implementation receipt from the finished benchmark workspace after recursive closeout timed out."
-            )
-        content = self.replace_heading_body(
-            content,
-            "TODO",
-            "\n".join(
-                [
-                    "- [x] Cite only final repo-root-relative changed files from the finished worktree.",
-                    "- [x] Tie implementation evidence to changed files and real current-run green logs.",
-                    "- [x] Replace placeholder pragmatic TDD notes with concrete benchmark evidence.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Changes Applied", changes_applied)
-        content = self.replace_heading_body(
-            content,
-            "TDD Compliance Log",
-            "\n".join(
-                [
-                    "- TDD Mode: pragmatic",
-                    "- Summary: The benchmark controller accepted the existing delivered code and synthesized the audited receipt after timeout, then relied on build/test/preview evidence as compensating validation.",
-                    "TDD Compliance: PASS",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Pragmatic TDD Exception",
-            "\n".join(
-                [
-                    "- Exception reason: The recursive agent timed out during late-phase documentation closeout after the product implementation already existed in the worktree.",
-                    f"- Compensating validation: {self.format_cited_paths(implementation_evidence)}",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Plan Deviations",
-            "- The controller synthesized this implementation receipt from the final changed worktree files instead of relying on an additional routed repair pass.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Implementation Evidence",
-            "\n".join(f"- `{path}`" for path in dedupe_preserve_order([*changed_paths, *implementation_evidence])),
-        )
-        content = self.replace_heading_body(content, "Traceability", "\n".join(traceability_lines))
-        content = self.replace_heading_body(
-            content,
-            "Audit Context",
-            "\n".join(
-                [
-                    "- Audit Execution Mode: self-audit",
-                    "- Subagent Availability: unavailable",
-                    "- Subagent Capability Probe: Benchmark controller synthesized this audited implementation artifact because no durable delegated subagent facility is available in the disposable benchmark workspace.",
-                    "- Delegation Decision Basis: Self-audit is faster and more reliable than another routed repair pass for controller-known benchmark implementation structure.",
-                    "- Audit Inputs Provided:",
-                    f"  - `.recursive/run/{run_id}/02-to-be-plan.md`",
-                    f"  - `.recursive/run/{run_id}/01-as-is.md`",
-                    "  - `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Effective Inputs Re-read",
-            "\n".join(
-                [
-                    f"- `.recursive/run/{run_id}/02-to-be-plan.md`",
-                    f"- `.recursive/run/{run_id}/01-as-is.md`",
-                    "- `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Earlier Phase Reconciliation",
-            "- The controller reconciled the synthesized Phase 3 receipt against the final benchmark plan, finished worktree diff, and current-run build/test/preview logs.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Subagent Contribution Verification",
-            "\n".join(
-                [
-                    "- Reviewed Action Records: none",
-                    f"- Main-Agent Verification Performed: `.recursive/run/{run_id}/02-to-be-plan.md`, `.recursive/run/{run_id}/01-as-is.md`, `.recursive/RECURSIVE.md`, and the final worktree diff/evidence logs.",
-                    "- Acceptance Decision: accepted",
-                    "- Refresh Handling: none",
-                    "- Repair Performed After Verification: controller synthesized the missing implementation receipt from the finished benchmark workspace.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Worktree Diff Audit", self.render_audited_worktree_diff_body(baseline_commit, diff_paths))
-        content = self.replace_heading_body(content, "Gaps Found", "- None.")
-        content = self.replace_heading_body(
-            content,
-            "Repair Work Performed",
-            "- Controller synthesized this missing Phase 3 benchmark artifact from the final worktree diff and current-run green logs after the routed closeout timed out.",
-        )
-        content = self.replace_heading_body(content, "Requirement Completion Status", "\n".join(requirement_lines))
-        content = re.sub(
-            r"(?ms)^## Audit Verdict\s+.*?(?=^## Coverage Gate)",
-            "## Audit Verdict\n\nAudit: PASS\n- Summary: Controller-synthesized Phase 3 receipt now cites the finished changed files and current-run implementation evidence.\n\n",
-            content,
-            count=1,
-        )
-        content = re.sub(r"(?m)^Coverage: FAIL$", "Coverage: PASS", content, count=1)
-        content = re.sub(r"(?m)^Approval: FAIL$", "Approval: PASS", content, count=1)
-        return self.finalize_locked_artifact(content)
-
-    def render_phase4_artifact(self, repo_root: Path, result: ArmResult, diff_paths: set[str]) -> str:
-        assert result.run_id
-        run_id = result.run_id
-        baseline_commit = self.read_recursive_lint_baseline_ref(repo_root, result) or "HEAD"
-        content = self.render_recursive_template_files(
-            run_id,
-            result.expected_product_root or f".worktrees/{run_id}",
-            baseline_commit,
-        )["04-test-summary.md"]
-        plan_surfaces = self.benchmark_requirement_plan_surfaces(repo_root, result, diff_paths)
-        build_log = f".recursive/run/{run_id}/evidence/logs/green/build.log"
-        test_log = f".recursive/run/{run_id}/evidence/logs/green/test.log"
-        preview_log = f".recursive/run/{run_id}/evidence/logs/green/preview.log"
-        evidence_paths = [path for path in (build_log, test_log, preview_log) if (repo_root / path).exists()]
-        screenshot_paths = plan_surfaces.get("R1", {}).get("qa", [])
-        traceability_lines: list[str] = []
-        requirement_lines: list[str] = []
-        for spec in self.benchmark_requirement_specs():
-            implementation_paths = plan_surfaces.get(spec.requirement_id, {}).get("implementation", [])
-            verification_paths = plan_surfaces.get(spec.requirement_id, {}).get("verification", [])
-            traceability_lines.append(
-                f"- {spec.requirement_id} -> Verified by {self.format_cited_paths(verification_paths)} while the implemented surfaces remain {self.format_cited_paths(implementation_paths)}."
-            )
-            requirement_lines.append(
-                f"- {spec.requirement_id} | Status: verified | "
-                f"Changed Files: {self.format_cited_paths(implementation_paths)} | "
-                f"Implementation Evidence: `.recursive/run/{run_id}/03-implementation-summary.md` | "
-                f"Verification Evidence: {self.format_cited_paths(verification_paths)} | "
-                "Audit Note: Controller synthesized this verification receipt from the completed benchmark evidence after recursive closeout timed out."
-            )
-        content = self.replace_heading_body(
-            content,
-            "TODO",
-            "\n".join(
-                [
-                    "- [x] Keep product citations repo-root-relative under the declared worktree.",
-                    "- [x] Keep verification evidence distinct from the Phase 3 implementation receipt.",
-                    "- [x] Replace placeholder verification notes with exact current-run logs and screenshots.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Pre-Test Implementation Audit",
-            "- Reviewed the finished worktree diff, the synthesized Phase 3 receipt, and the copied green build/test/preview logs before confirming verification coverage.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Environment",
-            "- Runtime: Node.js workspace under the benchmark-created recursive worktree.\n- Verification artifacts: copied into the current run `evidence/logs/green/` directory.\n- Browser evidence: benchmark screenshots copied into the current run `evidence/screenshots/` directory.",
-        )
-        content = self.replace_heading_body(content, "Execution Mode", "- automated")
-        content = self.replace_heading_body(
-            content,
-            "Commands Executed (Exact)",
-            "\n".join(
-                [
-                    "- `npm install`",
-                    "- `npm run build`",
-                    "- `npm run test`",
-                    "- `npm run preview --host 127.0.0.1 --port <benchmark-assigned-port>`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Results Summary",
-            "- Build: PASS.\n- Test: PASS.\n- Preview: PASS.\n- Observation: The product implementation completed before timeout; the controller synthesized this Phase 4 receipt from the resulting benchmark evidence.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Evidence and Artifacts",
-            "\n".join(f"- `{path}`" for path in dedupe_preserve_order([*evidence_paths, *screenshot_paths])),
-        )
-        content = self.replace_heading_body(content, "Failures and Diagnostics (if any)", "- None.")
-        content = self.replace_heading_body(content, "Flake/Rerun Notes", "- None.")
-        content = self.replace_heading_body(content, "Traceability", "\n".join(traceability_lines))
-        content = self.replace_heading_body(
-            content,
-            "Prior Recursive Evidence Reviewed",
-            "- None because the current run artifacts provide the required evidence and no earlier recursive run or memory path was needed.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Audit Context",
-            "\n".join(
-                [
-                    "- Audit Execution Mode: self-audit",
-                    "- Subagent Availability: unavailable",
-                    "- Subagent Capability Probe: Benchmark controller synthesized this audited test summary because no durable delegated subagent facility is available in the disposable benchmark workspace.",
-                    "- Delegation Decision Basis: Self-audit is faster and more reliable than another routed repair pass for controller-known benchmark verification structure.",
-                    "- Audit Inputs Provided:",
-                    f"  - `.recursive/run/{run_id}/03-implementation-summary.md`",
-                    f"  - `.recursive/run/{run_id}/02-to-be-plan.md`",
-                    "  - `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Effective Inputs Re-read",
-            "\n".join(
-                [
-                    f"- `.recursive/run/{run_id}/03-implementation-summary.md`",
-                    f"- `.recursive/run/{run_id}/02-to-be-plan.md`",
-                    "- `.recursive/RECURSIVE.md`",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(
-            content,
-            "Earlier Phase Reconciliation",
-            "- The controller reconciled the synthesized Phase 4 receipt against the final worktree diff, the synthesized Phase 3 receipt, and the copied green verification evidence.",
-        )
-        content = self.replace_heading_body(
-            content,
-            "Subagent Contribution Verification",
-            "\n".join(
-                [
-                    "- Reviewed Action Records: none",
-                    f"- Main-Agent Verification Performed: `.recursive/run/{run_id}/03-implementation-summary.md`, `.recursive/run/{run_id}/02-to-be-plan.md`, `.recursive/RECURSIVE.md`, and the final worktree diff/evidence logs.",
-                    "- Acceptance Decision: accepted",
-                    "- Refresh Handling: none",
-                    "- Repair Performed After Verification: controller synthesized the missing verification receipt from the finished benchmark workspace.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Worktree Diff Audit", self.render_audited_worktree_diff_body(baseline_commit, diff_paths))
-        content = self.replace_heading_body(content, "Gaps Found", "- None.")
-        content = self.replace_heading_body(
-            content,
-            "Repair Work Performed",
-            "- Controller synthesized this missing Phase 4 benchmark artifact from the final worktree diff and current-run verification evidence after the routed closeout timed out.",
-        )
-        content = self.replace_heading_body(content, "Requirement Completion Status", "\n".join(requirement_lines))
-        content = re.sub(
-            r"(?ms)^## Audit Verdict\s+.*?(?=^## Coverage Gate)",
-            "## Audit Verdict\n\nAudit: PASS\n- Summary: Controller-synthesized Phase 4 receipt now cites the finished changed files and distinct current-run verification evidence.\n\n",
-            content,
-            count=1,
-        )
-        content = re.sub(r"(?m)^Coverage: FAIL$", "Coverage: PASS", content, count=1)
-        content = re.sub(r"(?m)^Approval: FAIL$", "Approval: PASS", content, count=1)
-        return self.finalize_locked_artifact(content)
-
-    def render_manual_qa_artifact(
-        self,
-        repo_root: Path,
-        result: ArmResult,
-        screenshot_paths: list[str],
-    ) -> str:
-        assert result.run_id
-        run_id = result.run_id
-        qa_summary_rel = f".recursive/run/{run_id}/evidence/manual/qa-summary.txt"
-        preview_log = f".recursive/run/{run_id}/evidence/logs/green/preview.log"
-        summary_lines = [
-            f"Benchmark manual QA summary for {run_id}",
-            "",
-            "Controller synthesized this receipt from the existing preview/log/screenshot evidence after the recursive-on run timed out during late-phase closeout.",
-            "",
-            f"- Preview log: {preview_log}",
-        ]
-        if screenshot_paths:
-            summary_lines.append("- Screenshots:")
-            summary_lines.extend(f"  - {path}" for path in screenshot_paths)
-        write_text(repo_root / qa_summary_rel, "\n".join(summary_lines) + "\n")
-
-        traceability = [
-            f"- R1 -> `{qa_summary_rel}` and `{screenshot_paths[1] if len(screenshot_paths) > 1 else qa_summary_rel}` confirm CRUD-focused planner interaction states.",
-            f"- R2 -> `{qa_summary_rel}` and `{screenshot_paths[-1] if screenshot_paths else qa_summary_rel}` confirm search/filter review behavior.",
-            f"- R3 -> `{qa_summary_rel}` records browser-local persistence checks alongside the verified preview session.",
-            f"- R4 -> `{qa_summary_rel}` records import/export portability checks in the benchmark workspace.",
-            f"- R5 -> `{qa_summary_rel}` and `{screenshot_paths[0] if screenshot_paths else qa_summary_rel}` confirm empty-state and polished UI validation.",
-            f"- R6 -> `{qa_summary_rel}` and `{preview_log}` confirm the judged software ran successfully in preview.",
-        ]
-        content = "\n".join(
-            [
-                f"Run: `/.recursive/run/{run_id}/`",
-                "Phase: `05 Manual QA`",
-                "Status: `LOCKED`",
-                "Inputs:",
-                f"- `.recursive/run/{run_id}/04-test-summary.md`",
-                f"- `.recursive/run/{run_id}/03-implementation-summary.md`",
-                "Outputs:",
-                f"- `/.recursive/run/{run_id}/05-manual-qa.md`",
-                "Scope note: Agent-operated QA receipt synthesized from existing benchmark preview, screenshot, and log evidence.",
-                "",
-                "## TODO",
-                "",
-                "- [x] Replace all QA placeholders with the real execution metadata and evidence.",
-                "- [x] Keep screenshot and browser evidence repo-root-relative under the current run evidence directory.",
-                "- [x] Cite exact evidence files under the current run before marking QA complete.",
-                "",
-                "## QA Execution Record",
-                "",
-                "- QA Execution Mode: agent-operated",
-                "- Agent Executor: benchmark controller",
-                "- Tools Used: existing preview log review, screenshot evidence review, controller-side closeout synthesis",
-                "- Notes: The product was already built, tested, previewed, and screenshotted before recursive closeout timed out; this receipt records that completed QA evidence.",
-                "",
-                "## QA Scenarios and Results",
-                "",
-                "- Scenario: Validate empty state and polished planner layout. Result: PASS.",
-                "- Scenario: Validate loaded sample-data planner board and grouped workflow view. Result: PASS.",
-                "- Scenario: Validate search/filter workflow and preview availability. Result: PASS.",
-                "",
-                "## Evidence and Artifacts",
-                "",
-                f"- `{qa_summary_rel}`",
-                f"- `{preview_log}`",
-                *[f"- `{path}`" for path in screenshot_paths],
-                "",
-                "## User Sign-Off",
-                "",
-                "- Approved by: not required for agent-operated mode",
-                "- Date: not required for agent-operated mode",
-                "- Notes: No human sign-off required because the benchmark QA execution mode is agent-operated.",
-                "",
-                "## Traceability",
-                "",
-                *traceability,
-                "",
-                "## Coverage Gate",
-                "",
-                "Coverage: PASS",
-                "",
-                "## Approval Gate",
-                "",
-                "Approval: PASS",
-            ]
-        )
-        return self.finalize_locked_artifact(content)
-
-    def render_late_phase_artifact(
-        self,
-        repo_root: Path,
-        result: ArmResult,
-        artifact_name: str,
-        diff_paths: set[str],
-    ) -> str:
-        assert result.run_id
-        run_id = result.run_id
-        baseline_commit = self.read_recursive_lint_baseline_ref(repo_root, result) or "HEAD"
-        templates = self.render_recursive_template_files(
-            run_id,
-            result.expected_product_root or f".worktrees/{run_id}",
-            baseline_commit,
-        )
-        content = templates[artifact_name]
-        implementation_evidence = [f".recursive/run/{run_id}/03-implementation-summary.md"]
-        requirement_lines = self.render_verified_requirement_status_lines(
-            repo_root,
-            result,
-            diff_paths,
-            implementation_evidence=implementation_evidence,
-            verification_artifact_name=artifact_name,
-            audit_note="Controller synthesized this late-phase receipt from existing benchmark evidence after recursive closeout timed out.",
-        )
-        phase_details = {
-            "06-decisions-update.md": {
-                "todo": [
-                    "- [x] Record the benchmark-local decisions closeout for this disposable workspace.",
-                    "- [x] Keep requirement statuses verified with concrete current-run evidence paths.",
-                ],
-                "body": {
-                    "Decisions Changes Applied": "- Recorded that the recursive-on planner delivery is verified and closed in this disposable benchmark workspace without promoting an upstream durable decision.",
-                    "Rationale": "- The benchmark controller must leave a complete Phase 6 receipt even when the late-phase model closeout timed out after product verification had already succeeded.",
-                    "Resulting Decision Entry": f"- `.recursive/DECISIONS.md` remains the benchmark-local ledger reference for this disposable repo; this run's verified delivery is captured in `/.recursive/run/{run_id}/06-decisions-update.md`.",
-                    "Traceability": "\n".join(
-                        self.build_closeout_traceability_lines(
-                            result,
-                            "this Phase 6 receipt records the benchmark-local decisions closeout only.",
-                        )
-                    ),
-                    "Earlier Phase Reconciliation": "- The controller re-read Phases 3-5 and carried only existing repo-root-relative evidence into this late-phase receipt.",
-                },
-            },
-            "07-state-update.md": {
-                "todo": [
-                    "- [x] Record the actual benchmark-local state delta for the verified planner app.",
-                    "- [x] Keep the prior-recursive-evidence note explicit and justified.",
-                ],
-                "body": {
-                    "State Changes Applied": "- Recorded that the isolated planner worktree now contains a verified local-first planner implementation with passing build/test/preview evidence and captured screenshots.",
-                    "Rationale": "- The benchmark workspace needs a concrete current-state receipt so later phases can treat the verified planner delivery as durable within this disposable repo.",
-                    "Resulting State Summary": f"- `.recursive/STATE.md` remains the benchmark-local state summary reference; the verified planner delivery for this run is summarized in `/.recursive/run/{run_id}/07-state-update.md`.",
-                    "Traceability": "\n".join(
-                        self.build_closeout_traceability_lines(
-                            result,
-                            "this Phase 7 receipt records the resulting benchmark-local state only.",
-                        )
-                    ),
-                    "Prior Recursive Evidence Reviewed": "- None because no earlier recursive run or memory path was reviewed beyond the current benchmark run state.\n- Justification: This disposable benchmark workspace has no earlier in-repo recursive evidence relevant to the scoped planner change beyond the current run artifacts.",
-                    "Earlier Phase Reconciliation": "- The controller re-read Phases 4-6 and kept the state receipt aligned to existing benchmark evidence paths only.",
-                },
-            },
-            "08-memory-impact.md": {
-                "todo": [
-                    "- [x] Replace placeholder memory notes with the actual benchmark-local conclusion.",
-                    "- [x] Keep skill-usage capture normalized to the controller-side closeout that actually occurred.",
-                ],
-                "body": {
-                    "Changed Paths Review": "- Reviewed the final benchmark-owned changed paths captured in the current diff basis and confirmed no additional memory-owned repo surfaces were introduced beyond the disposable run receipts.",
-                    "Affected Memory Docs": "- None. This disposable benchmark workspace does not promote durable memory changes outside the current run artifacts.",
-                    "Run-Local Skill Usage Capture": "- Skill Usage Relevance: not-relevant\n- Available Skills: none exposed inside the disposable benchmark repo\n- Skills Sought: none\n- Skills Attempted: none\n- Skills Used: none\n- Worked Well: controller-side deterministic closeout repair completed without additional delegated skill usage\n- Issues Encountered: the original recursive late-phase closeout timed out before completing required artifacts\n- Future Guidance: prefer controller-side deterministic closeout repair for recurring benchmark late-phase lint failures\n- Promotion Candidates: none",
-                    "Skill Memory Promotion Review": "- Durable Skill Lessons Promoted: none\n- Generalized Guidance Updated: none\n- Run-Local Observations Left Unpromoted: controller-side closeout repair remained benchmark-local\n- Promotion Decision Rationale: the workspace is disposable and does not own durable repo memory updates.",
-                    "Uncovered Paths": "- None.",
-                    "Router and Parent Refresh": "- None.",
-                    "Final Status Summary": "- The planner product is already verified; this Phase 8 receipt records that no additional durable memory promotion is required for the disposable benchmark workspace.",
-                    "Traceability": "\n".join(
-                        self.build_closeout_traceability_lines(
-                            result,
-                            "this Phase 8 receipt records the memory-impact review only.",
-                        )
-                    ),
-                    "Prior Recursive Evidence Reviewed": "- None because no earlier recursive run or memory path was reviewed beyond the current benchmark run state.\n- Justification: This disposable benchmark workspace has no earlier in-repo recursive evidence relevant to the scoped planner change beyond the current run artifacts.",
-                    "Earlier Phase Reconciliation": "- The controller re-read Phases 4-7 and verified that no additional durable memory updates were needed for this disposable benchmark repo.",
-                },
-            },
-        }
-        details = phase_details[artifact_name]
-        content = self.replace_heading_body(content, "TODO", "\n".join(details["todo"]))
-        for heading, body in details["body"].items():
-            content = self.upsert_heading_body(content, heading, body, before_heading="Audit Context")
-        audit_inputs = {
-            "06-decisions-update.md": [f".recursive/run/{run_id}/04-test-summary.md", f".recursive/run/{run_id}/05-manual-qa.md", ".recursive/RECURSIVE.md"],
-            "07-state-update.md": [f".recursive/run/{run_id}/06-decisions-update.md", f".recursive/run/{run_id}/05-manual-qa.md", ".recursive/RECURSIVE.md"],
-            "08-memory-impact.md": [f".recursive/run/{run_id}/07-state-update.md", f".recursive/run/{run_id}/05-manual-qa.md", ".recursive/RECURSIVE.md"],
-        }[artifact_name]
-        content = self.replace_heading_body(
-            content,
-            "Audit Context",
-            "\n".join(
-                [
-                    "- Audit Execution Mode: self-audit",
-                    "- Subagent Availability: unavailable",
-                    "- Subagent Capability Probe: Benchmark controller synthesized this audited closeout artifact because no durable delegated subagent facility is available in the disposable benchmark workspace.",
-                    "- Delegation Decision Basis: Self-audit is faster and more reliable than another routed repair pass for controller-known benchmark closeout structure.",
-                    "- Audit Inputs Provided:",
-                    *[f"  - `{path}`" for path in audit_inputs],
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Effective Inputs Re-read", "\n".join(f"- `{path}`" for path in audit_inputs))
-        content = self.replace_heading_body(
-            content,
-            "Subagent Contribution Verification",
-            "\n".join(
-                [
-                    "- Reviewed Action Records: none",
-                    f"- Main-Agent Verification Performed: `.recursive/run/{run_id}/03-implementation-summary.md`, `.recursive/run/{run_id}/04-test-summary.md`, `.recursive/run/{run_id}/05-manual-qa.md`, `.recursive/RECURSIVE.md`",
-                    "- Acceptance Decision: accepted",
-                    "- Refresh Handling: none",
-                    "- Repair Performed After Verification: controller synthesized the missing late-phase benchmark receipt from existing run evidence.",
-                ]
-            ),
-        )
-        reviewed_paths = "\n".join(f"  - `{path}`" for path in sorted(diff_paths)) or "  - None."
-        content = self.replace_heading_body(
-            content,
-            "Worktree Diff Audit",
-            "\n".join(
-                [
-                    "- Baseline type: commit",
-                    f"- Baseline reference: `{baseline_commit}`",
-                    "- Comparison reference: working-tree",
-                    f"- Normalized baseline: `{baseline_commit}`",
-                    "- Normalized comparison: working-tree",
-                    f"- Normalized diff command: `git diff --name-only {baseline_commit}`",
-                    "- Actual changed files reviewed:",
-                    reviewed_paths,
-                    "- Unexplained drift: none.",
-                ]
-            ),
-        )
-        content = self.replace_heading_body(content, "Gaps Found", "- None.")
-        content = self.replace_heading_body(
-            content,
-            "Repair Work Performed",
-            "- Controller synthesized this missing benchmark late-phase artifact from existing run evidence after the routed closeout timed out.",
-        )
-        content = self.replace_heading_body(content, "Requirement Completion Status", "\n".join(requirement_lines))
-        content = re.sub(
-            r"(?ms)^## Audit Verdict\s+.*?(?=^## Coverage Gate)",
-            "## Audit Verdict\n\nAudit: PASS\n- Summary: Controller-synthesized benchmark closeout reconciles the verified evidence and current diff.\n\n",
-            content,
-            count=1,
-        )
-        content = re.sub(r"(?m)^Coverage: FAIL$", "Coverage: PASS", content, count=1)
-        content = re.sub(r"(?m)^Approval: FAIL$", "Approval: PASS", content, count=1)
-        return self.finalize_locked_artifact(content)
-
-    def materialize_missing_recursive_closeout_artifacts(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "incomplete":
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        missing = {
-            name
-            for name, present in result.recursive_artifact_status.items()
-            if not present
-            and name
-            in {
-                "02-to-be-plan.md",
-                "03-implementation-summary.md",
-                "04-test-summary.md",
-                "05-manual-qa.md",
-                "06-decisions-update.md",
-                "07-state-update.md",
-                "08-memory-impact.md",
-            }
-        }
-        if not missing:
-            return False
-        self.ensure_recursive_evidence_layout(run_root)
-        diff_paths = self.current_recursive_lint_diff_paths(logs_root)
-        screenshot_dir = run_root / "evidence" / "screenshots"
-        screenshot_paths = [
-            normalize_benchmark_path(str(path.relative_to(repo_root)))
-            for path in sorted(screenshot_dir.glob("*"))
-            if path.is_file()
-        ]
-        changed = False
-        if (run_root / "02-to-be-plan.md").exists() or "02-to-be-plan.md" in missing:
-            write_text(run_root / "02-to-be-plan.md", self.render_phase2_artifact(repo_root, result, diff_paths))
-            changed = True
-        if (run_root / "03-implementation-summary.md").exists() or "03-implementation-summary.md" in missing:
-            write_text(run_root / "03-implementation-summary.md", self.render_phase3_artifact(repo_root, result, diff_paths))
-            changed = True
-        if (run_root / "04-test-summary.md").exists() or "04-test-summary.md" in missing:
-            write_text(run_root / "04-test-summary.md", self.render_phase4_artifact(repo_root, result, diff_paths))
-            changed = True
-        if (run_root / "05-manual-qa.md").exists() or "05-manual-qa.md" in missing:
-            write_text(run_root / "05-manual-qa.md", self.render_manual_qa_artifact(repo_root, result, screenshot_paths))
-            changed = True
-        for artifact_name in ("06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"):
-            if not (artifact_name in missing or (run_root / artifact_name).exists()):
-                continue
-            write_text(run_root / artifact_name, self.render_late_phase_artifact(repo_root, result, artifact_name, diff_paths))
-            changed = True
-        return changed
-
-    def trim_requirement_changed_files_to_diff(self, artifact_path: Path, diff_paths: set[str]) -> bool:
-        if not artifact_path.exists():
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        lines = original.splitlines()
-        updated_lines: list[str] = []
-        in_requirement_status = False
-        changed = False
-        for line in lines:
-            stripped = line.strip()
-            if re.match(r"^[ \t]*##\s+Requirement Completion Status\s*$", line):
-                in_requirement_status = True
-                updated_lines.append(line)
-                continue
-            if in_requirement_status and re.match(r"^[ \t]*##\s+", line):
-                in_requirement_status = False
-            if in_requirement_status and stripped.startswith("- ") and "Changed Files:" in line:
-                indent = line[: len(line) - len(line.lstrip())]
-                body = stripped[2:]
-                parts = [part.strip() for part in body.split(" | ")]
-                for index, part in enumerate(parts):
-                    if not part.startswith("Changed Files:"):
-                        continue
-                    value = part[len("Changed Files:") :].strip()
-                    normalized_value, part_changed = self.normalize_changed_files_field(value, diff_paths)
-                    if part_changed:
-                        parts[index] = f"Changed Files: {normalized_value}"
-                        changed = True
-                line = indent + "- " + " | ".join(parts)
-            updated_lines.append(line)
-        if not changed:
-            return False
-        artifact_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8", newline="\n")
-        return True
-
-    @staticmethod
-    def preferred_requirement_for_changed_path(path: str) -> str:
-        lowered = normalize_benchmark_path(path).lower()
-        if lowered.endswith("/.gitignore") or lowered == ".recursive/decisions.md" or lowered == ".recursive/state.md":
-            return "R6"
-        if lowered.startswith(".recursive/memory/"):
-            return "R6"
-        if lowered.endswith("/app.test.tsx") or lowered.endswith("/test-setup.ts"):
-            return "R6"
-        if lowered.endswith("/storage.ts"):
-            return "R3"
-        if lowered.endswith("/filterbar.tsx") or lowered.endswith("/plannerboard.tsx") or lowered.endswith("/summarybar.tsx"):
-            return "R2"
-        if lowered.endswith("/emptystate.tsx") or lowered.endswith("/styles.css"):
-            return "R5"
-        if lowered.endswith("/app.tsx") and "src/" in lowered:
-            return "R1"
-        if lowered.endswith("/types.ts") or lowered.endswith("/useplanner.ts") or lowered.endswith("/workitemform.tsx"):
-            return "R1"
-        return "R1"
-
-    def backfill_requirement_changed_files_to_diff(self, artifact_path: Path, diff_paths: set[str]) -> bool:
-        if not artifact_path.exists():
-            return False
-        candidate_diff_paths = [path for path in sorted(diff_paths)]
-        if not candidate_diff_paths:
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        lines = original.splitlines()
-        in_requirement_status = False
-        entries: list[dict[str, object]] = []
-        covered_paths: set[str] = set()
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            if re.match(r"^[ \t]*##\s+Requirement Completion Status\s*$", line):
-                in_requirement_status = True
-                continue
-            if in_requirement_status and re.match(r"^[ \t]*##\s+", line):
-                in_requirement_status = False
-            if not in_requirement_status or not stripped.startswith("- ") or "Changed Files:" not in line:
-                continue
-            indent = line[: len(line) - len(line.lstrip())]
-            body = stripped[2:]
-            parts = [part.strip() for part in body.split(" | ")]
-            requirement_id = parts[0].strip("`")
-            changed_index = -1
-            changed_files: list[str] = []
-            for part_index, part in enumerate(parts):
-                if not part.startswith("Changed Files:"):
-                    continue
-                changed_index = part_index
-                changed_files = self.extract_cited_paths(part[len("Changed Files:") :].strip())
-                covered_paths.update(changed_files)
-                break
-            if changed_index < 0:
-                continue
-            entries.append(
-                {
-                    "line_index": index,
-                    "indent": indent,
-                    "parts": parts,
-                    "requirement_id": requirement_id,
-                    "changed_index": changed_index,
-                    "changed_files": changed_files,
-                }
-            )
-        missing_paths = [path for path in candidate_diff_paths if path not in covered_paths]
-        if not missing_paths or not entries:
-            return False
-        entries_by_requirement = {str(entry["requirement_id"]): entry for entry in entries}
-        fallback_entry = entries[0]
-        for missing_path in missing_paths:
-            preferred_requirement = self.preferred_requirement_for_changed_path(missing_path)
-            entry = entries_by_requirement.get(preferred_requirement, fallback_entry)
-            changed_files = list(entry["changed_files"])
-            if missing_path not in changed_files:
-                changed_files.append(missing_path)
-                entry["changed_files"] = changed_files
-        for entry in entries:
-            parts = list(entry["parts"])
-            changed_index = int(entry["changed_index"])
-            parts[changed_index] = f"Changed Files: {self.format_cited_paths(dedupe_preserve_order(list(entry['changed_files'])))}"
-            lines[int(entry["line_index"])] = str(entry["indent"]) + "- " + " | ".join(parts)
-        artifact_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-        return True
-
-    def current_recursive_lint_diff_paths(self, logs_root: Path) -> set[str]:
-        lint_root = logs_root / "recursive-lint-root"
-        if not lint_root.exists():
-            return set()
-        diff_result = self.run_command(
-            ["git", "diff", "--name-only"],
-            cwd=lint_root,
-            timeout_seconds=30,
-            check=False,
-        )
-        if diff_result.returncode != 0:
-            return set()
-        return {
-            normalize_benchmark_path(raw_line.strip())
-            for raw_line in diff_result.stdout.splitlines()
-            if raw_line.strip()
-        }
-
-    def reconcile_recursive_requirement_changed_files(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any(
-            marker in finding
-            for marker in (
-                "Changed Files are outside the current diff scope",
-                "Requirement Completion Status leaves diff-owned changed file(s) unaccounted for",
-                "with Status implemented must cite Changed Files",
-                "with Status verified must cite Changed Files",
-            )
-            for finding in lint_findings
-        ):
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        diff_paths = self.current_recursive_lint_diff_paths(logs_root)
-        if not diff_paths:
-            return False
-        if self.rewrite_recursive_requirement_status_artifacts(repo_root, logs_root, result):
-            return True
-        candidate_diff_paths = set(self.benchmark_product_diff_paths(repo_root, result, diff_paths)) or diff_paths
-        changed = False
-        for artifact_name in (
-            "03-implementation-summary.md",
-            "04-test-summary.md",
-            "06-decisions-update.md",
-            "07-state-update.md",
-            "08-memory-impact.md",
-        ):
-            if self.trim_requirement_changed_files_to_diff(run_root / artifact_name, candidate_diff_paths):
-                changed = True
-            if self.backfill_requirement_changed_files_to_diff(run_root / artifact_name, candidate_diff_paths):
-                changed = True
-        return changed
-
-    def reconcile_recursive_requirement_evidence(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any(
-            marker in finding
-            for marker in (
-                "Implementation Evidence must reference",
-                "Implementation Evidence path(s) do not exist",
-                "with Status implemented must cite file or artifact paths in Implementation Evidence",
-                "with Status verified must cite file or artifact paths in Implementation Evidence",
-                "Verification Evidence path(s) do not exist",
-                "Verification Evidence must cite",
-                "Verification Evidence cannot be satisfied",
-            )
-            for finding in lint_findings
-        ):
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        alias_map = self.current_run_artifact_aliases(result)
-        changed_any = False
-        for artifact_name in (
-            "03-implementation-summary.md",
-            "04-test-summary.md",
-            "06-decisions-update.md",
-            "07-state-update.md",
-            "08-memory-impact.md",
-        ):
-            artifact_path = run_root / artifact_name
-            if not artifact_path.exists():
-                continue
-            original = artifact_path.read_text(encoding="utf-8", errors="replace")
-            lines = original.splitlines()
-            updated_lines: list[str] = []
-            in_requirement_status = False
-            artifact_changed = False
-            for line in lines:
-                stripped = line.strip()
-                if re.match(r"^[ \t]*##\s+Requirement Completion Status\s*$", line):
-                    in_requirement_status = True
-                    updated_lines.append(line)
-                    continue
-                if in_requirement_status and re.match(r"^[ \t]*##\s+", line):
-                    in_requirement_status = False
-                if in_requirement_status and stripped.startswith("- ") and "Status:" in line:
-                    indent = line[: len(line) - len(line.lstrip())]
-                    body = stripped[2:]
-                    parts = [part.strip() for part in body.split(" | ") if part.strip()]
-                    fields: dict[str, str] = {"Requirement ID": parts[0].strip("`")}
-                    for part in parts[1:]:
-                        if ":" not in part:
-                            continue
-                        key, value = part.split(":", 1)
-                        fields[key.strip()] = value.strip()
-
-                    changed_files = self.extract_cited_paths(fields.get("Changed Files", ""))
-                    normalized_parts: list[str] = [parts[0]]
-                    saw_impl = False
-                    saw_verification = False
-                    requirement_id = fields.get("Requirement ID", "")
-                    status_value = fields.get("Status", "").strip("`").strip()
-                    implementation_paths: list[str] = []
-                    for part in parts[1:]:
-                        if ":" not in part:
-                            normalized_parts.append(part)
-                            continue
-                        key, raw_value = part.split(":", 1)
-                        key = key.strip()
-                        value = raw_value.strip()
-                        if key == "Implementation Evidence":
-                            saw_impl = True
-                            rewritten, rewrite_changed = self.rewrite_field_artifact_aliases(value, alias_map)
-                            implementation_paths = [
-                                path
-                                for path in self.extract_cited_paths(rewritten)
-                                if path in changed_files or (repo_root / path).exists() or path.startswith("benchmark/")
-                            ]
-                            if (
-                                changed_files
-                                and not set(implementation_paths).intersection(changed_files)
-                                and not any(path.startswith(f".recursive/run/{result.run_id}/") for path in implementation_paths)
-                            ):
-                                merged = dedupe_preserve_order([*changed_files, *implementation_paths])
-                                rewritten = self.format_cited_paths(merged)
-                                artifact_changed = True
-                            elif not implementation_paths:
-                                fallback_impl = changed_files or [f".recursive/run/{result.run_id}/03-implementation-summary.md"]
-                                rewritten = self.format_cited_paths(fallback_impl)
-                                artifact_changed = True
-                            else:
-                                rewritten = self.format_cited_paths(implementation_paths)
-                                artifact_changed = artifact_changed or rewrite_changed
-                            normalized_parts.append(f"Implementation Evidence: {rewritten}")
-                            continue
-                        if key == "Verification Evidence":
-                            saw_verification = True
-                            rewritten, rewrite_changed = self.rewrite_field_artifact_aliases(value, alias_map)
-                            verification_paths = [
-                                path
-                                for path in self.extract_cited_paths(rewritten)
-                                if (repo_root / path).exists()
-                            ]
-                            if not verification_paths or (
-                                implementation_paths and set(verification_paths).issubset(set(implementation_paths))
-                            ):
-                                defaults = self.default_requirement_verification_paths(
-                                    repo_root,
-                                    result,
-                                    artifact_name,
-                                    requirement_id,
-                                )
-                                if defaults:
-                                    rewritten = self.format_cited_paths(defaults)
-                                    artifact_changed = True
-                            else:
-                                artifact_changed = artifact_changed or rewrite_changed
-                            normalized_parts.append(f"Verification Evidence: {rewritten}")
-                            continue
-                        normalized_parts.append(part)
-
-                    if status_value in {"implemented", "verified"} and not saw_impl:
-                        fallback_impl = changed_files or [f".recursive/run/{result.run_id}/03-implementation-summary.md"]
-                        normalized_parts.append(f"Implementation Evidence: {self.format_cited_paths(fallback_impl)}")
-                        artifact_changed = True
-                    if status_value == "verified" and not saw_verification:
-                        defaults = self.default_requirement_verification_paths(repo_root, result, artifact_name, requirement_id)
-                        if defaults:
-                            normalized_parts.append(f"Verification Evidence: {self.format_cited_paths(defaults)}")
-                            artifact_changed = True
-                    line = indent + "- " + " | ".join(normalized_parts)
-                updated_lines.append(line)
-            if artifact_changed:
-                artifact_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8", newline="\n")
-                changed_any = True
-        return changed_any
-
-    def replace_worktree_diff_audit_paths(self, artifact_path: Path, diff_paths: set[str]) -> bool:
-        if not artifact_path.exists() or not diff_paths:
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        section_body = self.get_heading_body(original, "Worktree Diff Audit")
-        if not section_body:
-            return False
-        explicit_block = "- Actual changed files reviewed:\n" + "\n".join(
-            f"  - `{path}`" for path in sorted(diff_paths)
-        )
-        pattern = re.compile(
-            r"(?ms)^[ \t]*-\s*(?:Reviewed paths|Actual changed files reviewed):.*?(?=^[ \t]*-\s*Unexplained drift:|^[ \t]*##\s+|\Z)"
-        )
-        updated_body, count = pattern.subn(explicit_block + "\n", section_body, count=1)
-        if count == 0:
-            if re.search(r"(?mi)^[ \t]*-\s*Unexplained drift:", section_body):
-                updated_body = re.sub(
-                    r"(?mi)^([ \t]*-\s*Unexplained drift:)",
-                    explicit_block + "\n\\1",
-                    section_body,
-                    count=1,
-                )
-            else:
-                updated_body = section_body.rstrip() + "\n" + explicit_block + "\n"
-        if updated_body == section_body:
-            return False
-        updated = self.replace_heading_body(original, "Worktree Diff Audit", updated_body)
-        if updated == original:
-            return False
-        artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-        return True
-
-    def reconcile_recursive_diff_audit(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any("Worktree Diff Audit does not account for actual changed files from git diff" in finding for finding in lint_findings):
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        diff_paths = self.current_recursive_lint_diff_paths(logs_root)
-        if not diff_paths:
-            return False
-        changed = False
-        for artifact_name in (
-            "03-implementation-summary.md",
-            "04-test-summary.md",
-            "06-decisions-update.md",
-            "07-state-update.md",
-            "08-memory-impact.md",
-        ):
-            if self.replace_worktree_diff_audit_paths(run_root / artifact_name, diff_paths):
-                changed = True
-        return changed
-
-    def reconcile_recursive_phase1_requirement_statuses(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any(
-            "01-as-is.md: Requirement Completion Status" in finding
-            or "01-as-is.md: Requirement " in finding and "with Status verified" in finding
-            for finding in lint_findings
-        ):
-            return False
-        artifact_path = repo_root / ".recursive" / "run" / result.run_id / "01-as-is.md"
-        if not artifact_path.exists():
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        section_body = self.get_heading_body(original, "Requirement Completion Status")
-        if not section_body:
-            return False
-
-        baseline_log = f".recursive/run/{result.run_id}/evidence/logs/baseline/baseline-test.log"
-        normalized_lines: list[str] = []
-        changed = False
-        for raw_line in section_body.splitlines():
-            line = raw_line.strip()
-            if not line.startswith(("-", "*")):
-                normalized_lines.append(raw_line.rstrip())
-                continue
-            parts = [part.strip() for part in line[1:].strip().split("|") if part.strip()]
-            if len(parts) < 2:
-                normalized_lines.append(raw_line.rstrip())
-                continue
-            requirement_id = parts[0].strip().strip("`")
-            fields: dict[str, str] = {"Requirement ID": requirement_id}
-            for part in parts[1:]:
-                if ":" not in part:
-                    continue
-                key, value = part.split(":", 1)
-                fields[key.strip()] = value.strip().strip("`")
-
-            status = fields.get("Status", "").strip().lower()
-            if status == "partial":
-                fields["Status"] = "blocked"
-                changed = True
-            elif status == "verified":
-                fields = {
-                    "Requirement ID": requirement_id,
-                    "Status": "blocked",
-                    "Rationale": fields.get(
-                        "Rationale",
-                        "Baseline quality checks may pass, but implementation and full verification evidence belong to later phases.",
-                    ),
-                    "Blocking Evidence": fields.get("Blocking Evidence") or baseline_log,
-                    "Audit Note": fields.get("Audit Note", "Baseline only."),
-                }
-                changed = True
-
-            ordered_fields: list[tuple[str, str]] = [("Status", fields.get("Status", ""))]
-            status_normalized = fields.get("Status", "").strip().lower()
-            if status_normalized == "blocked":
-                ordered_fields.extend(
-                    [
-                        ("Rationale", fields.get("Rationale", "")),
-                        ("Blocking Evidence", fields.get("Blocking Evidence", "")),
-                        ("Audit Note", fields.get("Audit Note", "")),
-                    ]
-                )
-            else:
-                for key in (
-                    "Rationale",
-                    "Blocking Evidence",
-                    "Changed Files",
-                    "Implementation Evidence",
-                    "Verification Evidence",
-                    "Audit Note",
-                ):
-                    if key in fields:
-                        ordered_fields.append((key, fields[key]))
-
-            rendered_parts = [f"- {requirement_id}"]
-            for key, value in ordered_fields:
-                if self.is_meaningful_markdown_value(value):
-                    rendered_parts.append(f"{key}: {value}")
-            normalized_lines.append(" | ".join(rendered_parts))
-
-        updated = self.replace_heading_body(
-            original,
-            "Requirement Completion Status",
-            "\n".join(line for line in normalized_lines if line is not None).strip(),
-        )
-        if updated == original:
-            return False
-        artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-        return True
-
-    def reconcile_recursive_phase2_mapping(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any(
-            marker in finding
-            for marker in (
-                "02-to-be-plan.md: Missing required section heading: ## Playwright Plan (if applicable)",
-                "02-to-be-plan.md: Requirement Mapping for",
-                "02-to-be-plan.md: Prior Recursive Evidence Reviewed must contain structured run/memory paths or an explicit no-relevant-evidence justification",
-            )
-            for finding in lint_findings
-        ):
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        phase1_path = run_root / "01-as-is.md"
-        phase2_path = run_root / "02-to-be-plan.md"
-        if not phase1_path.exists() or not phase2_path.exists():
-            return False
-
-        inventory_entries = {
-            entry.get("Requirement ID", ""): entry
-            for entry in self.parse_pipe_entry_fields(self.get_heading_body(phase1_path.read_text(encoding="utf-8", errors="replace"), "Source Requirement Inventory"))
-            if entry.get("Requirement ID")
-        }
-        original = phase2_path.read_text(encoding="utf-8", errors="replace")
-        updated = re.sub(
-            r"(?mi)^([ \t]*##\s+)Playwright Plan([ \t]*)$",
-            r"\1Playwright Plan (if applicable)\2",
-            original,
-        )
-        if not self.has_heading(updated, "Playwright Plan (if applicable)"):
-            updated = self.upsert_heading_body(
-                updated,
-                "Playwright Plan (if applicable)",
-                "- Not applicable for this benchmark run; automated verification uses the existing Vitest suite and benchmark-controlled screenshots.",
-                before_heading="Manual QA Scenarios",
-            )
-        mapping_body = self.get_heading_body(updated, "Requirement Mapping")
-        diff_paths = self.current_recursive_lint_diff_paths(logs_root)
-        r6_surfaces = [
-            path
-            for path in sorted(diff_paths)
-            if path.startswith(f".worktrees/{result.run_id}/")
-        ] or self.phase2_requirement_surfaces(repo_root, result).get("R6", [])
-        if mapping_body:
-            revised_lines: list[str] = []
-            body_changed = False
-            for raw_line in mapping_body.splitlines():
-                stripped = raw_line.strip()
-                if stripped.startswith("- "):
-                    body = stripped[2:]
-                    parts = [part.strip() for part in body.split(" | ") if part.strip()]
-                    if parts:
-                        requirement_id = parts[0].strip("`")
-                        inventory_quote = inventory_entries.get(requirement_id, {}).get("Source Quote", "").strip()
-                        if inventory_quote:
-                            line_changed = False
-                            rebuilt_parts = [parts[0]]
-                            saw_source_quote = False
-                            for part in parts[1:]:
-                                if part.startswith("Source Quote:"):
-                                    saw_source_quote = True
-                                    current_quote = part.split(":", 1)[1].strip()
-                                    if self.normalize_source_text(current_quote) != self.normalize_source_text(inventory_quote):
-                                        part = f"Source Quote: {inventory_quote}"
-                                        line_changed = True
-                                elif part.startswith("Implementation Surface:") and requirement_id == "R6":
-                                    cited_paths = self.extract_cited_paths(part.split(":", 1)[1].strip())
-                                    if not cited_paths and r6_surfaces:
-                                        part = f"Implementation Surface: {self.format_cited_paths(r6_surfaces)}"
-                                        line_changed = True
-                                rebuilt_parts.append(part)
-                            if not saw_source_quote:
-                                rebuilt_parts.insert(1, f"Source Quote: {inventory_quote}")
-                                line_changed = True
-                            if line_changed:
-                                indent = raw_line[: len(raw_line) - len(raw_line.lstrip())]
-                                raw_line = indent + "- " + " | ".join(rebuilt_parts)
-                                body_changed = True
-                revised_lines.append(raw_line)
-            if body_changed:
-                updated = self.replace_heading_body(updated, "Requirement Mapping", "\n".join(revised_lines))
-        if any("Prior Recursive Evidence Reviewed" in finding for finding in lint_findings):
-            updated = self.upsert_heading_body(
-                updated,
-                "Prior Recursive Evidence Reviewed",
-                "- None because no earlier recursive run or memory path was reviewed beyond the current benchmark run state.\n"
-                "- Justification: This disposable benchmark workspace has no earlier in-repo recursive evidence relevant to the scoped planner change beyond the current run artifacts.",
-                before_heading="Audit Context",
-            )
-        if updated == original:
-            return False
-        phase2_path.write_text(updated, encoding="utf-8", newline="\n")
-        return True
-
-    def reconcile_recursive_prior_evidence(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        target_files = [
-            artifact_name
-            for artifact_name in ("02-to-be-plan.md", "04-test-summary.md", "07-state-update.md", "08-memory-impact.md")
-            if any(f"{artifact_name}: Prior Recursive Evidence Reviewed" in finding for finding in lint_findings)
-        ]
-        if not target_files:
-            return False
-        replacement = (
-            "- None because no earlier recursive run or memory path was reviewed beyond the current benchmark run state.\n"
-            "- Justification: This disposable benchmark workspace has no earlier in-repo recursive evidence relevant to the scoped planner change beyond the current run artifacts."
-        )
-        changed = False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        for artifact_name in target_files:
-            artifact_path = run_root / artifact_name
-            if not artifact_path.exists():
-                continue
-            original = artifact_path.read_text(encoding="utf-8", errors="replace")
-            updated = self.upsert_heading_body(original, "Prior Recursive Evidence Reviewed", replacement, before_heading="Audit Context")
-            if updated != original:
-                artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-                changed = True
-        return changed
-
-    def reconcile_recursive_subagent_capability_probe(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        target_files = [
-            artifact_name
-            for artifact_name in (
-                "03-implementation-summary.md",
-                "04-test-summary.md",
-                "06-decisions-update.md",
-                "07-state-update.md",
-                "08-memory-impact.md",
-            )
-            if any(f"{artifact_name}: Audit Context is missing Subagent Capability Probe" in finding for finding in lint_findings)
-        ]
-        if not target_files:
-            return False
-        replacement = (
-            "Benchmark controller uses self-audit here because no durable delegated subagent facility is available "
-            "inside the disposable benchmark workspace."
-        )
-        changed = False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        for artifact_name in target_files:
-            artifact_path = run_root / artifact_name
-            if not artifact_path.exists():
-                continue
-            original = artifact_path.read_text(encoding="utf-8", errors="replace")
-            audit_context = self.get_heading_body(original, "Audit Context")
-            if not audit_context:
-                continue
-            if re.search(r"(?mi)^[ \t]*-\s*Subagent Capability Probe:", audit_context):
-                updated_context = re.sub(
-                    r"(?mi)^([ \t]*-\s*Subagent Capability Probe:\s*).*$",
-                    rf"\1{replacement}",
-                    audit_context,
-                    count=1,
-                )
-            else:
-                updated_context = re.sub(
-                    r"(?mi)^([ \t]*-\s*Subagent Availability:.*)$",
-                    rf"\1\n- Subagent Capability Probe: {replacement}",
-                    audit_context,
-                    count=1,
-                )
-            if updated_context == audit_context:
-                continue
-            artifact_path.write_text(
-                self.replace_heading_body(original, "Audit Context", updated_context),
-                encoding="utf-8",
-                newline="\n",
-            )
-            changed = True
-        return changed
-
-    def reconcile_recursive_missing_header_fields(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        target_files = [
-            artifact_name
-            for artifact_name in (
-                "00-worktree.md",
-                "01-as-is.md",
-                "02-to-be-plan.md",
-                "03-implementation-summary.md",
-                "04-test-summary.md",
-                "05-manual-qa.md",
-                "06-decisions-update.md",
-                "07-state-update.md",
-                "08-memory-impact.md",
-            )
-            if any(
-                f"{artifact_name}: Missing required header field(s):" in finding
-                or f"{artifact_name}: Status is LOCKED but missing:" in finding
-                for finding in lint_findings
-            )
-        ]
-        if not target_files:
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        diff_paths = self.current_recursive_lint_diff_paths(logs_root)
-        screenshot_paths = [
-            normalize_benchmark_path(str(path.relative_to(repo_root)))
-            for path in sorted((run_root / "evidence" / "screenshots").glob("*"))
-            if path.is_file()
-        ]
-        changed = False
-        for artifact_name in target_files:
-            artifact_path = run_root / artifact_name
-            if artifact_name in {"00-worktree.md", "01-as-is.md"}:
-                if not artifact_path.exists():
-                    continue
-                original = artifact_path.read_text(encoding="utf-8", errors="replace")
-                without_run_headers = re.sub(r"(?m)^\ufeff?Run:\s*.*(?:\r?\n)?", "", original)
-                run_header = f"Run: `/.recursive/run/{result.run_id}/`"
-                if re.search(r"(?m)^Phase:\s*", without_run_headers):
-                    rewritten = re.sub(
-                        r"(?m)^(Phase:\s*)",
-                        f"{run_header}\n\\1",
-                        without_run_headers,
-                        count=1,
-                    )
-                else:
-                    rewritten = f"{run_header}\n{without_run_headers.lstrip(chr(0xfeff))}"
-                rewritten = self.finalize_locked_artifact(rewritten)
-            elif artifact_name == "02-to-be-plan.md":
-                rewritten = self.render_phase2_artifact(repo_root, result, diff_paths)
-            elif artifact_name == "03-implementation-summary.md":
-                rewritten = self.render_phase3_artifact(repo_root, result, diff_paths)
-            elif artifact_name == "04-test-summary.md":
-                rewritten = self.render_phase4_artifact(repo_root, result, diff_paths)
-            elif artifact_name == "05-manual-qa.md":
-                rewritten = self.render_manual_qa_artifact(repo_root, result, screenshot_paths)
-            else:
-                rewritten = self.render_late_phase_artifact(repo_root, result, artifact_name, diff_paths)
-            if artifact_path.read_text(encoding="utf-8", errors="replace") != rewritten.rstrip() + "\n":
-                write_text(artifact_path, rewritten)
-                changed = True
-        return changed
-
-    def rewrite_recursive_requirement_status_artifacts(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id:
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        diff_paths = self.current_recursive_lint_diff_paths(logs_root)
-        screenshot_paths = [
-            normalize_benchmark_path(str(path.relative_to(repo_root)))
-            for path in sorted((run_root / "evidence" / "screenshots").glob("*"))
-            if path.is_file()
-        ]
-        rewritten = {
-            "03-implementation-summary.md": self.render_phase3_artifact(repo_root, result, diff_paths),
-            "04-test-summary.md": self.render_phase4_artifact(repo_root, result, diff_paths),
-            "06-decisions-update.md": self.render_late_phase_artifact(repo_root, result, "06-decisions-update.md", diff_paths),
-            "07-state-update.md": self.render_late_phase_artifact(repo_root, result, "07-state-update.md", diff_paths),
-            "08-memory-impact.md": self.render_late_phase_artifact(repo_root, result, "08-memory-impact.md", diff_paths),
-        }
-        if (run_root / "05-manual-qa.md").exists():
-            rewritten["05-manual-qa.md"] = self.render_manual_qa_artifact(repo_root, result, screenshot_paths)
-        changed = False
-        for artifact_name, content in rewritten.items():
-            artifact_path = run_root / artifact_name
-            if not artifact_path.exists() or artifact_path.read_text(encoding="utf-8", errors="replace") != content.rstrip() + "\n":
-                write_text(artifact_path, content)
-                changed = True
-        return changed
-
-    def reconcile_recursive_gaps_found(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        target_files = [
-            artifact_name
-            for artifact_name in (
-                "01-as-is.md",
-                "02-to-be-plan.md",
-                "03-implementation-summary.md",
-                "04-test-summary.md",
-                "06-decisions-update.md",
-                "07-state-update.md",
-                "08-memory-impact.md",
-            )
-            if any(f"{artifact_name}: Audit: PASS is invalid while Gaps Found still lists unresolved in-scope gaps" in finding for finding in lint_findings)
-        ]
-        if not target_files:
-            return False
-        changed = False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        for artifact_name in target_files:
-            artifact_path = run_root / artifact_name
-            if not artifact_path.exists():
-                continue
-            original = artifact_path.read_text(encoding="utf-8", errors="replace")
-            updated = self.replace_heading_body(original, "Gaps Found", "- None.")
-            if updated != original:
-                artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-                changed = True
-        return changed
-
-    def reconcile_recursive_traceability(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any("Traceability is missing explicit coverage for" in finding for finding in lint_findings):
-            return False
-        run_root = repo_root / ".recursive" / "run" / result.run_id
-        if not run_root.exists():
-            return False
-        requirement_ids = [spec.requirement_id for spec in self.benchmark_requirement_specs()]
-        default_notes = {
-            "06-decisions-update.md": (
-                f"Verified closeout evidence remains in `.recursive/run/{result.run_id}/04-test-summary.md` and "
-                f"`.recursive/run/{result.run_id}/05-manual-qa.md`; this phase records the decisions ledger delta."
-            ),
-            "07-state-update.md": (
-                f"Verified closeout evidence remains in `.recursive/run/{result.run_id}/04-test-summary.md` and "
-                f"`.recursive/run/{result.run_id}/05-manual-qa.md`; this phase records the resulting state update."
-            ),
-            "08-memory-impact.md": (
-                f"Verified closeout evidence remains in `.recursive/run/{result.run_id}/04-test-summary.md` and "
-                f"`.recursive/run/{result.run_id}/05-manual-qa.md`; this phase records memory and skill-usage impact only."
-            ),
-        }
-        changed = False
-        for artifact_name, fallback_note in default_notes.items():
-            artifact_path = run_root / artifact_name
-            if not artifact_path.exists():
-                continue
-            original = artifact_path.read_text(encoding="utf-8", errors="replace")
-            traceability_body = self.get_heading_body(original, "Traceability")
-            if not traceability_body:
-                continue
-            missing_ids = [requirement_id for requirement_id in requirement_ids if requirement_id not in traceability_body]
-            if not missing_ids:
-                continue
-            seed_note = fallback_note
-            for raw_line in traceability_body.splitlines():
-                match = re.match(r"\s*-\s*R\d+(?:-R\d+)?\s*->\s*(.+)$", raw_line)
-                if match:
-                    seed_note = match.group(1).strip()
-                    break
-            expanded_body = traceability_body.rstrip()
-            if expanded_body:
-                expanded_body += "\n"
-            expanded_body += "\n".join(f"- {requirement_id} -> {seed_note}" for requirement_id in missing_ids)
-            updated = self.replace_heading_body(original, "Traceability", expanded_body)
-            if updated != original:
-                artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-                changed = True
-        return changed
-
-    def reconcile_phase8_skill_usage_relevance(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any("Skill Usage Relevance" in finding for finding in lint_findings):
-            return False
-        artifact_path = repo_root / ".recursive" / "run" / result.run_id / "08-memory-impact.md"
-        if not artifact_path.exists():
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        section_body = self.get_heading_body(original, "Run-Local Skill Usage Capture")
-        if not section_body:
-            return False
-        attempted = self.get_markdown_field_value(section_body, "Skills Attempted")
-        used = self.get_markdown_field_value(section_body, "Skills Used")
-        desired = (
-            "relevant"
-            if self.is_meaningful_markdown_value(attempted) or self.is_meaningful_markdown_value(used)
-            else "not-relevant"
-        )
-        updated_body, changed = self.replace_markdown_field_value(section_body, "Skill Usage Relevance", desired)
-        if not changed:
-            return False
-        updated = self.replace_heading_body(original, "Run-Local Skill Usage Capture", updated_body)
-        artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-        return True
-
-    def reconcile_pragmatic_tdd_exception_section(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if result.arm_name != "recursive-on" or not result.run_id or result.recursive_workflow_status != "lint-failed":
-            return False
-        lint_findings = self.collect_recursive_lint_findings(logs_root / "recursive-lint.log")
-        if not any("TDD Mode pragmatic requires ## Pragmatic TDD Exception" in finding for finding in lint_findings):
-            return False
-        artifact_path = repo_root / ".recursive" / "run" / result.run_id / "03-implementation-summary.md"
-        if not artifact_path.exists():
-            return False
-        original = artifact_path.read_text(encoding="utf-8", errors="replace")
-        if self.has_heading(original, "Pragmatic TDD Exception"):
-            return False
-        exception_reason = self.get_markdown_field_value(self.get_heading_body(original, "TDD Compliance Log"), "Exception reason")
-        compensating_validation = self.get_markdown_field_value(
-            self.get_heading_body(original, "TDD Compliance Log"),
-            "Compensating validation",
-        )
-        if not exception_reason and not compensating_validation:
-            return False
-        section_lines = [
-            "## Pragmatic TDD Exception",
-            "",
-            f"- Exception reason: {exception_reason or 'See TDD Compliance Log.'}",
-        ]
-        if compensating_validation:
-            section_lines.append(f"- Compensating validation: {compensating_validation}")
-        if "## Plan Deviations" in original:
-            updated = original.replace("## Plan Deviations", "\n".join(section_lines) + "\n\n## Plan Deviations", 1)
-        else:
-            updated = original.rstrip() + "\n\n" + "\n".join(section_lines) + "\n"
-        if updated == original:
-            return False
-        artifact_path.write_text(updated, encoding="utf-8", newline="\n")
-        return True
-
-    def reconcile_recursive_closeout_artifacts(self, repo_root: Path, logs_root: Path, result: ArmResult) -> bool:
-        if self.recursive_preflight_runner_failure_blocks_closeout(repo_root, result):
-            self.note_recursive_preflight_closeout_skip(result)
-            return False
-        changed_any = False
-        for _ in range(3):
-            changed = False
-            if self.materialize_missing_recursive_closeout_artifacts(repo_root, logs_root, result):
-                changed = True
-                self.evaluate_recursive_run(repo_root, logs_root, result)
-            if self.reconcile_recursive_phase1_requirement_statuses(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_phase2_mapping(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_prior_evidence(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_subagent_capability_probe(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_missing_header_fields(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_gaps_found(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_pragmatic_tdd_exception_section(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_pragmatic_tdd_exception_field(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_requirement_changed_files(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_diff_audit(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_requirement_evidence(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_recursive_traceability(repo_root, logs_root, result):
-                changed = True
-            if self.reconcile_phase8_skill_usage_relevance(repo_root, logs_root, result):
-                changed = True
-            if not changed:
-                break
-            changed_any = True
-            self.evaluate_recursive_run(repo_root, logs_root, result)
-            if result.recursive_workflow_status != "lint-failed":
-                break
-        return changed_any
 
     def normalize_claimed_product_path(self, raw_value: str, product_root: Path, expected_product_root: str) -> str:
         candidate = raw_value.strip().strip("`").strip()
@@ -6152,11 +4036,6 @@ class BenchmarkHarness:
             if candidate:
                 normalized_candidates.append(candidate)
         return dedupe_preserve_order(normalized_candidates)
-
-    @staticmethod
-    def read_workflow_version(content: str) -> str:
-        match = re.search(r"(?m)^[ \t]*Workflow version:\s*(?:`|\")?([^`\"\r\n]+)(?:`|\")?\s*$", content)
-        return match.group(1).strip() if match else ""
 
     def resolve_agent_log_path(self, repo_root: Path, product_root: Path) -> Path:
         candidates = [product_root / "benchmark" / "agent-log.md", repo_root / "benchmark" / "agent-log.md"]
@@ -7250,7 +5129,7 @@ class BenchmarkHarness:
         lint_result = self.run_command(
             [
                 self.python_exe,
-                str(self.script_dir / "lint-recursive-run.py"),
+                str(self.runtime_dir / "lint-recursive-run.py"),
                 "--repo-root",
                 str(lint_repo_root),
                 "--run-id",
@@ -7283,15 +5162,9 @@ class BenchmarkHarness:
             return
 
         result.recursive_workflow_status = "complete"
-        requirements_text = (run_root / "00-requirements.md").read_text(encoding="utf-8", errors="replace")
-        workflow_version = self.read_workflow_version(requirements_text) or "missing"
-        result.recursive_workflow_profile = workflow_version
-
         phase1_text = (run_root / "01-as-is.md").read_text(encoding="utf-8", errors="replace")
         phase2_text = (run_root / "02-to-be-plan.md").read_text(encoding="utf-8", errors="replace")
         missing_guardrails: list[str] = []
-        if workflow_version != "recursive-mode-audit-v2":
-            missing_guardrails.append(f"workflow-version={workflow_version}")
         if not self.has_heading(phase1_text, "Source Requirement Inventory"):
             missing_guardrails.append("01-as-is.md:Source Requirement Inventory")
         if not self.has_heading(phase2_text, "Requirement Mapping"):
@@ -7350,7 +5223,6 @@ class BenchmarkHarness:
                     f"| Agent status | `{off.agent_status}` | `{on.agent_status}` | n/a |",
                     f"| Product outcome | `{off.product_status}` | `{on.product_status}` | n/a |",
                     f"| Recursive workflow | `{off.recursive_workflow_status}` | `{on.recursive_workflow_status}` | n/a |",
-                    f"| Recursive workflow profile | `{off.recursive_workflow_profile}` | `{on.recursive_workflow_profile}` | n/a |",
                     f"| Phase 1/2 guardrails | `{off.recursive_phase2_guardrails}` | `{on.recursive_phase2_guardrails}` | n/a |",
                     f"| Worktree isolation | `{off.recursive_isolation_status}` | `{on.recursive_isolation_status}` | n/a |",
                     f"| Delivery integrity | `{off.recursive_delivery_status}` | `{on.recursive_delivery_status}` | n/a |",
@@ -7559,7 +5431,6 @@ class BenchmarkHarness:
                     f"- Agent status: `{result.agent_status}`",
                     f"- Product outcome: `{result.product_status}`",
                     f"- Recursive workflow: `{result.recursive_workflow_status}`",
-                    f"- Recursive workflow profile: `{result.recursive_workflow_profile}`",
                     f"- Phase 1/2 guardrails: `{result.recursive_phase2_guardrails}`",
                     f"- Worktree isolation: `{result.recursive_isolation_status}`",
                     f"- Delivery integrity: `{result.recursive_delivery_status}`",

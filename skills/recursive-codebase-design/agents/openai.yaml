@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recursive Codebase Design"
+  short_description: "Codebase, module, and program design in Phase 2"
+  default_prompt: "Use $recursive-codebase-design to shape modules, interfaces, seams, and program design for this Phase 2 plan."

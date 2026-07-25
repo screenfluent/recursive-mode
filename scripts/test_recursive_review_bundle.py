@@ -10,8 +10,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_PATH = REPO_ROOT / "scripts" / "recursive-review-bundle.py"
-PS_SCRIPT_PATH = REPO_ROOT / "scripts" / "recursive-review-bundle.ps1"
+SCRIPT_PATH = REPO_ROOT / "skills" / "recursive-mode" / "scripts" / "recursive-review-bundle.py"
+PS_SCRIPT_PATH = REPO_ROOT / "skills" / "recursive-mode" / "scripts" / "recursive-review-bundle.ps1"
 
 
 class RecursiveReviewBundleTests(unittest.TestCase):
@@ -44,6 +44,8 @@ class RecursiveReviewBundleTests(unittest.TestCase):
             ),
         )
         self._write(self.run_root / "03.5-code-review.md", "# Code Review\n")
+        self._write(self.repo_root / ".recursive" / "config" / "recursive-router.json", "{}\n")
+        self._write(self.repo_root / ".recursive" / "config" / "recursive-router-discovered.json", "{}\n")
         self._write(self.repo_root / "src" / "app.py", "print('changed')\n")
 
     def tearDown(self) -> None:
@@ -77,6 +79,14 @@ class RecursiveReviewBundleTests(unittest.TestCase):
                 "code-reviewer",
                 "--artifact-path",
                 ".recursive/run/run-123/03.5-code-review.md",
+                "--review-id",
+                "code-review",
+                "--pass",
+                "0001",
+                "--code-ref",
+                "src/app.py",
+                "--audit-question",
+                "Does the changed behavior match the plan?",
                 "--routing-config-path",
                 ".recursive/config/recursive-router.json",
                 "--routing-discovery-path",
@@ -93,7 +103,7 @@ class RecursiveReviewBundleTests(unittest.TestCase):
         )
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        bundle_path = self.run_root / "evidence" / "review-bundles" / "03-5-code-review-code-reviewer.md"
+        bundle_path = self.run_root / "evidence" / "review-bundles" / "phase-3-5" / "code-review" / "0001.md"
         content = bundle_path.read_text(encoding="utf-8")
         self.assertIn("## Routing", content)
         self.assertIn("- Routed CLI: `codex`", content)
@@ -122,6 +132,14 @@ class RecursiveReviewBundleTests(unittest.TestCase):
                 "code-reviewer",
                 "-ArtifactPath",
                 ".recursive/run/run-123/03.5-code-review.md",
+                "-ReviewId",
+                "code-review-powershell",
+                "-ReviewPass",
+                "0001",
+                "-CodeRef",
+                "src/app.py",
+                "-AuditQuestion",
+                "Does the changed behavior match the plan?",
                 "-RoutingConfigPath",
                 ".recursive/config/recursive-router.json",
                 "-RoutingDiscoveryPath",
@@ -138,7 +156,7 @@ class RecursiveReviewBundleTests(unittest.TestCase):
         )
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        bundle_path = self.run_root / "evidence" / "review-bundles" / "03-5-code-review-code-reviewer.md"
+        bundle_path = self.run_root / "evidence" / "review-bundles" / "phase-3-5" / "code-review-powershell" / "0001.md"
         content = bundle_path.read_text(encoding="utf-8")
         self.assertIn("- Routed CLI: `codex`", content)
         self.assertIn("- Routed Model: `gpt-5.4`", content)

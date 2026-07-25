@@ -20,7 +20,18 @@ If you just need a lightweight routing/index doc for what to read under `/.recur
 
 Installable entrypoints:
 
-- `/SKILL.md`
+- `/skills/recursive-mode/SKILL.md`
+- `/skills/recursive-architecture-survey/SKILL.md`
+- `/skills/recursive-codebase-design/SKILL.md`
+- `/skills/recursive-delivery-slicing/SKILL.md`
+- `/skills/recursive-domain-modeling/SKILL.md`
+- `/skills/recursive-grilling/SKILL.md`
+- `/skills/recursive-handoff/SKILL.md`
+- `/skills/recursive-merge-conflicts/SKILL.md`
+- `/skills/recursive-prototype/SKILL.md`
+- `/skills/recursive-research/SKILL.md`
+- `/skills/recursive-residue-sweep/SKILL.md`
+- `/skills/recursive-review/SKILL.md`
 - `/skills/recursive-spec/SKILL.md`
 - `/skills/recursive-worktree/SKILL.md`
 - `/skills/recursive-debugging/SKILL.md`
@@ -29,6 +40,7 @@ Installable entrypoints:
 - `/skills/recursive-router/SKILL.md`
 - `/skills/recursive-subagent/SKILL.md`
 - `/skills/recursive-training/SKILL.md`
+- `/skills/recursive-wayfinder/SKILL.md`
 
 Optional add-on source doc:
 
@@ -64,7 +76,7 @@ The installer bootstraps the canonical layout in a target repo:
         phase8-skill-memory-promotion.md
     archive/
   scripts/
-    recursive-training-*.py / *.ps1
+    installed runtime scripts copied from the `recursive-mode` package
   run/
     <run-id>/
 .codex/AGENTS.md
@@ -75,10 +87,10 @@ The installer bootstraps the canonical layout in a target repo:
 - `/.recursive/AGENTS.md` is a lightweight internal router/index
 - `/.recursive/RECURSIVE.md` remains the only workflow source of truth
 - `/.recursive/memory/training/` stores extracted experiential learnings from completed runs, indexed through `/.recursive/memory/MEMORY.md`
-- `/.recursive/scripts/` holds the bootstrapped runtime copies of the training scripts used by the installed scaffold
+- `/.recursive/scripts/` holds the complete bootstrapped runtime copied from the installed `recursive-mode` package
 - `/.recursive/config/recursive-router.json` is the canonical user-editable routed delegation policy; when an agent updates it, use the router configure-and-verify path instead of saving unchecked bindings
 - `/.recursive/config/recursive-router-discovered.json` is generated locally after router probe or verification, should stay gitignored in target repos, and is not part of the bootstrapped scaffold
-- `references/bootstrap/RECURSIVE.md` is the packaged non-hidden bootstrap copy that installers use from installed skill directories; keep it byte-for-byte aligned with `/.recursive/RECURSIVE.md`
+- `skills/recursive-mode/references/bootstrap/RECURSIVE.md` is the packaged non-hidden bootstrap copy that installers use from installed skill directories; keep it byte-for-byte aligned with `/.recursive/RECURSIVE.md`
 
 ## Main Maintainer Commands
 
@@ -119,7 +131,7 @@ pwsh -NoProfile -File "<SKILL_DIR>/scripts/lint-recursive-run.ps1" -RepoRoot . -
 Generate a delegated review bundle:
 
 ```bash
-python "<SKILL_DIR>/scripts/recursive-review-bundle.py" --repo-root . --run-id "<run-id>" --phase "03.5 Code Review" --role code-reviewer --artifact-path "/.recursive/run/<run-id>/03.5-code-review.md" --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" --upstream-artifact "/.recursive/run/<run-id>/02-to-be-plan.md" --audit-question "Which R# remain incomplete?" --required-output "Findings ordered by severity"
+python "<SKILL_DIR>/scripts/recursive-review-bundle.py" --repo-root . --run-id "<run-id>" --phase "02 TO-BE" --role planner --review-id plan-review --pass 0001 --artifact-path "/.recursive/run/<run-id>/02-to-be-plan.md" --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" --upstream-artifact "/.recursive/run/<run-id>/01-as-is.md" --audit-question "Which accepted requirements are not planned?"
 ```
 
 Scaffold a late-phase closeout artifact:
@@ -150,36 +162,36 @@ npx skills add "<repo-root>" --skill '*' --full-depth --yes
 python ".agents/skills/recursive-mode/scripts/install-recursive-mode.py" --repo-root .
 ```
 
-That path should install the current recursive-mode package, include `recursive-training`, exclude `recursive-benchmark`, and let the installed bootstrap create the training-aware scaffold (`/.recursive/memory/training/`, `/.recursive/scripts/recursive-training-*`, and the stable memory pointer files).
+That path should install the complete recursive-mode package surface, including `recursive-training` and excluding `recursive-benchmark`, and let the installed root skill create the complete repo-local scaffold, including `/.recursive/memory/training/`, `/.recursive/scripts/recursive-training-*`, and the stable memory pointer files.
 
 Run the paired benchmark harness:
 
 The benchmark add-on is intentionally not part of the default exported recursive-mode package surface; use it only when benchmarking is explicitly requested.
 
 ```bash
-python "<SKILL_DIR>/scripts/run-recursive-benchmark.py" --runner all --scenario local-first-planner
-python "<SKILL_DIR>/scripts/run-recursive-benchmark.py" --runner kimi --scenario team-capacity-board --arm-mode parallel
-python "<SKILL_DIR>/scripts/run-recursive-benchmark.py" --runner opencode --opencode-model opencode/gpt-5-nano --scenario team-capacity-board
-pwsh -NoProfile -File "<SKILL_DIR>/scripts/run-recursive-benchmark.ps1" -Runner all -Scenario local-first-planner
+python "<REPO_ROOT>/scripts/run-recursive-benchmark.py" --runner all --scenario local-first-planner
+python "<REPO_ROOT>/scripts/run-recursive-benchmark.py" --runner kimi --scenario team-capacity-board --arm-mode parallel
+python "<REPO_ROOT>/scripts/run-recursive-benchmark.py" --runner opencode --opencode-model opencode/gpt-5-nano --scenario team-capacity-board
+pwsh -NoProfile -File "<REPO_ROOT>/scripts/run-recursive-benchmark.ps1" -Runner all -Scenario local-first-planner
 ```
 
 ## Maintainer Smoke Harness
 
-Run the explicit module regression command first; plain `python -m unittest` does not discover this repo's tests:
+Run explicit discovery first; plain `python -m unittest` does not discover this repo's tests:
 
 ```bash
-python -m unittest scripts.test_install_recursive_mode scripts.test_lint_recursive_run scripts.test_recursive_phase_rules scripts.test_recursive_review_bundle scripts.test_recursive_router scripts.test_recursive_subagent_action scripts.test_recursive_training scripts.test_run_recursive_benchmark
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
 Run disposable regression coverage when changing this repo itself:
 
 ```bash
-python "<SKILL_DIR>/scripts/test-recursive-mode-smoke.py" --scenario quick --toolchain mixed
-python "<SKILL_DIR>/scripts/test-recursive-mode-smoke.py" --scenario full --toolchain python --keep-temp
-python "<SKILL_DIR>/scripts/test-recursive-mode-smoke.py" --scenario subagent --toolchain mixed
+python "<REPO_ROOT>/scripts/test-recursive-mode-smoke.py" --scenario quick --toolchain mixed
+python "<REPO_ROOT>/scripts/test-recursive-mode-smoke.py" --scenario full --toolchain python --keep-temp
+python "<REPO_ROOT>/scripts/test-recursive-mode-smoke.py" --scenario subagent --toolchain mixed
 
-pwsh -NoProfile -File "<SKILL_DIR>/scripts/test-recursive-mode-smoke.ps1" -Scenario quick -Toolchain mixed
-pwsh -NoProfile -File "<SKILL_DIR>/scripts/test-recursive-mode-smoke.ps1" -Scenario subagent -Toolchain mixed
+pwsh -NoProfile -File "<REPO_ROOT>/scripts/test-recursive-mode-smoke.ps1" -Scenario quick -Toolchain mixed
+pwsh -NoProfile -File "<REPO_ROOT>/scripts/test-recursive-mode-smoke.ps1" -Scenario subagent -Toolchain mixed
 ```
 
 Notes:
@@ -192,8 +204,8 @@ Notes:
 
 ## Delegation And Review
 
-- prefer `recursive-review-bundle` for delegated Phase 3.5 review
-- record `Review Bundle Path`
+- use `recursive-review-bundle` for delegated review of every audited phase
+- record both `Review Bundle Path` and `Review Ledger Path`, then keep the immutable bundle, canonical ledger, phase artifact and pass number aligned
 - use `recursive-subagent-action` for durable delegated work records
 - verify delegated claims against actual files, diffs, bundles, and recursive artifacts before acceptance
 

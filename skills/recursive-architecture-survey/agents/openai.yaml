@@ -1,0 +1,6 @@
+interface:
+  display_name: "Recursive Architecture Survey"
+  short_description: "Survey architecture health and deepening"
+  default_prompt: "Use $recursive-architecture-survey to survey this repository architecture."
+policy:
+  allow_implicit_invocation: true

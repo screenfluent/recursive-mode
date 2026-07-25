@@ -1,0 +1,7 @@
+interface:
+  display_name: "Recursive Wayfinder"
+  short_description: "Map fog into a spec-ready slice"
+  default_prompt: "Use $recursive-wayfinder to chart or advance a foggy multi-session effort toward a spec-ready slice."
+
+policy:
+  allow_implicit_invocation: false

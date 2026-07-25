@@ -10,6 +10,7 @@ with bounded subprocess timeouts so smoke tests fail fast instead of hanging.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -36,6 +37,17 @@ ARTIFACT_SEQUENCE = [
     "07-state-update.md",
     "08-memory-impact.md",
 ]
+
+AUDITED_PHASE_KEYS = {
+    "01-as-is.md": "phase-1",
+    "02-to-be-plan.md": "phase-2",
+    "03-implementation-summary.md": "phase-3",
+    "03.5-code-review.md": "phase-3-5",
+    "04-test-summary.md": "phase-4",
+    "06-decisions-update.md": "phase-6",
+    "07-state-update.md": "phase-7",
+    "08-memory-impact.md": "phase-8",
+}
 
 
 class SmokeError(RuntimeError):
@@ -128,6 +140,7 @@ class SmokeHarness:
         self.command_timeout = command_timeout
         self.script_dir = Path(__file__).resolve().parent
         self.repo_source_root = self.script_dir.parent
+        self.runtime_dir = self.repo_source_root / "skills" / "recursive-mode" / "scripts"
         self.python_exe = Path(sys.executable).resolve()
         self.preflight_notes: list[str] = []
         self.powershell_exe = self._resolve_powershell()
@@ -139,6 +152,7 @@ class SmokeHarness:
         self.base_branch = "main"
         self.base_commit = ""
         self.bundle_path = ""
+        self.review_bundle_paths: dict[str, str] = {}
         self.parity_bundle_path = ""
         self.red_log = ""
         self.green_log = ""
@@ -204,6 +218,8 @@ class SmokeHarness:
         try:
             env = os.environ.copy()
             env["PYTHONDONTWRITEBYTECODE"] = "1"
+            if self.powershell_exe is not None and Path(command[0]).resolve() == self.powershell_exe.resolve():
+                env["PYTHON"] = str(self.python_exe)
             completed = subprocess.run(
                 command,
                 cwd=str(cwd or self.repo_root),
@@ -250,7 +266,7 @@ class SmokeHarness:
         return self.run_command(["git", *args], cwd=self.repo_root, allowed_returncodes=allowed_returncodes)
 
     def python_command(self, script_name: str, *args: str) -> list[str]:
-        return [str(self.python_exe), str(self.script_dir / script_name), *args]
+        return [str(self.python_exe), str(self.runtime_dir / script_name), *args]
 
     def powershell_command(self, script_name: str, *args: str) -> list[str]:
         if self.powershell_exe is None:
@@ -261,7 +277,7 @@ class SmokeHarness:
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            str(self.script_dir / script_name),
+            str(self.runtime_dir / script_name),
             *args,
         ]
 
@@ -464,8 +480,8 @@ class SmokeHarness:
             if snippet not in scaffold:
                 raise SmokeError(f"recursive-init did not prefill the expected Phase 0 diff-basis snippet: {snippet}")
         requirements_scaffold = (self.run_dir / "00-requirements.md").read_text(encoding="utf-8")
-        if "Workflow version: `recursive-mode-audit-v2`" not in requirements_scaffold:
-            raise SmokeError("recursive-init did not default new runs to recursive-mode-audit-v2.")
+        if "Workflow version:" in requirements_scaffold:
+            raise SmokeError("recursive-init retained a superseded workflow-profile field.")
         self.summary.append("Run scaffold success: recursive-init produced a reusable Phase 0 diff basis.")
 
     @property
@@ -576,26 +592,23 @@ class SmokeHarness:
         )
         self.preview_log = self.repo_rel(preview_path)
 
-    def generate_review_bundle(self, toolchain: str, output_name: str) -> str:
-        artifact_path = f"/.recursive/run/{self.run_id}/03.5-code-review.md"
+    def generate_review_bundle(self, toolchain: str, output_name: str, *, artifact_name: str = "03.5-code-review.md", pass_id: str = "0001", extra_evidence: list[str] | None = None) -> str:
+        phase_key = AUDITED_PHASE_KEYS[artifact_name]
+        review_id = Path(output_name).stem
+        artifact_path = f"/.recursive/run/{self.run_id}/{artifact_name}"
         code_refs = ["tiny_tasks.py", "test_tiny_tasks.py"]
-        upstream = [
-            f".recursive/run/{self.run_id}/00-requirements.md",
-            f".recursive/run/{self.run_id}/01-as-is.md",
-            f".recursive/run/{self.run_id}/02-to-be-plan.md",
-            f".recursive/run/{self.run_id}/03-implementation-summary.md",
-        ]
-        evidence = [self.red_log.lstrip("/"), self.green_log.lstrip("/")]
+        artifact_index = ARTIFACT_SEQUENCE.index(artifact_name)
+        upstream = [f".recursive/run/{self.run_id}/{name}" for name in ARTIFACT_SEQUENCE[:artifact_index] if (self.run_dir / name).is_file()]
+        addenda: list[str] = []
+        if artifact_index > ARTIFACT_SEQUENCE.index("02-to-be-plan.md") and self.plan_addendum_path:
+            addenda.append(self.plan_addendum_path.lstrip("/"))
+        if artifact_index > ARTIFACT_SEQUENCE.index("04-test-summary.md") and self.test_upstream_gap_addendum_path:
+            addenda.append(self.test_upstream_gap_addendum_path.lstrip("/"))
+        evidence = [self.red_log.lstrip("/"), self.green_log.lstrip("/"), *(path.lstrip("/") for path in (extra_evidence or []))]
         questions = [
-            "Does the implementation satisfy R1 and the Phase 2 plan?",
-            "Do the changed files align with the owned product diff for Phase 3.5?",
-            "Are the RED and GREEN evidence references concrete and sufficient?",
-        ]
-        required_output = [
-            "Findings ordered by severity",
-            "Requirement alignment assessment",
-            "Diff reconciliation summary",
-            "Explicit pass or repair verdict",
+            f"Does {artifact_name} satisfy R1 and its effective upstream artifacts?",
+            "Do the reviewed paths align with the phase-owned diff surface?",
+            "Is the cited evidence concrete and sufficient?",
         ]
 
         if toolchain == "python":
@@ -607,14 +620,21 @@ class SmokeHarness:
                 "--run-id",
                 self.run_id,
                 "--phase",
-                "03.5 Code Review",
+                artifact_name,
                 "--role",
                 "code-reviewer",
                 "--artifact-path",
                 artifact_path,
+                "--review-id",
+                review_id,
+                "--pass",
+                pass_id,
             )
             for item in upstream:
                 command.extend(["--upstream-artifact", item])
+            for item in addenda:
+                command.extend(["--addendum", item])
+            command.append("--no-auto-addenda")
             command.extend(["--control-doc", ".recursive/RECURSIVE.md"])
             for code_ref in code_refs:
                 command.extend(["--code-ref", code_ref])
@@ -622,9 +642,6 @@ class SmokeHarness:
                 command.extend(["--evidence-ref", evidence_ref])
             for question in questions:
                 command.extend(["--audit-question", question])
-            for item in required_output:
-                command.extend(["--required-output", item])
-            command.extend(["--output-name", output_name])
         else:
             command = self.script_command(
                 "powershell",
@@ -634,22 +651,147 @@ class SmokeHarness:
                 "-RunId",
                 self.run_id,
                 "-Phase",
-                "03.5 Code Review",
+                artifact_name,
                 "-Role",
                 "code-reviewer",
                 "-ArtifactPath",
                 artifact_path,
+                "-ReviewId",
+                review_id,
+                "-ReviewPass",
+                pass_id,
             )
             command.extend(["-UpstreamArtifact", ",".join(upstream)])
+            if addenda:
+                command.extend(["-Addendum", ",".join(addenda)])
+            command.append("-NoAutoAddenda")
             command.extend(["-ControlDoc", ".recursive/RECURSIVE.md"])
             command.extend(["-CodeRef", ",".join(code_refs)])
             command.extend(["-EvidenceRef", ",".join(evidence)])
             command.extend(["-AuditQuestion", ",".join(questions)])
-            command.extend(["-RequiredOutput", ",".join(required_output)])
-            command.extend(["-OutputName", output_name])
 
         self.run_command(command, cwd=self.repo_root)
-        return self.repo_rel(self.run_dir / "evidence" / "review-bundles" / output_name)
+        return self.repo_rel(self.run_dir / "evidence" / "review-bundles" / phase_key / review_id / f"{pass_id}.md")
+
+    @staticmethod
+    def normalized_review_snapshot_hash(content: str) -> str:
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"(?m)^[ \t]*- Verified Pass Hash:.*(?:\n|$)", "", normalized)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def create_terminal_review(self, artifact_name: str, review_id: str, *, pass_number: int = 1, extra_evidence: list[str] | None = None) -> str:
+        phase_key = AUDITED_PHASE_KEYS[artifact_name]
+        pass_id = f"{pass_number:04d}"
+        ledger_rel = f"/.recursive/run/{self.run_id}/evidence/reviews/{phase_key}/{review_id}/ledger.md"
+        pass_rel = f"/.recursive/run/{self.run_id}/evidence/reviews/{phase_key}/{review_id}/passes/{pass_id}.md"
+        expected_bundle_path = f"/.recursive/run/{self.run_id}/evidence/review-bundles/{phase_key}/{review_id}/{pass_id}.md"
+        artifact = self.run_dir / artifact_name
+        metadata = "\n".join(
+            [
+                f"- Review ID: {review_id}",
+                f"- Review Ledger Path: `{ledger_rel}`",
+                f"- Latest Verified Pass: `{pass_rel}`",
+                "- Latest Verified Pass Hash: <pending>",
+                f"- Review Bundle Path: `{expected_bundle_path}`",
+                "- Review Bundle Hash: <pending>",
+            ]
+        )
+        write_text(artifact, replace_section(artifact.read_text(encoding="utf-8"), "Review Metadata", metadata))
+        bundle_path = self.generate_review_bundle(self.primary_toolchain(), f"{review_id}.md", artifact_name=artifact_name, pass_id=pass_id, extra_evidence=extra_evidence)
+        if bundle_path != expected_bundle_path:
+            raise SmokeError(f"Review bundle path mismatch: expected {expected_bundle_path}, generated {bundle_path}")
+        bundle_file = self.repo_root / bundle_path.lstrip("/")
+        bundle_hash = hashlib.sha256(bundle_file.read_bytes()).hexdigest()
+        artifact_index = ARTIFACT_SEQUENCE.index(artifact_name)
+        scope_evidence = [bundle_path]
+        scope_evidence.extend(f"/.recursive/run/{self.run_id}/{name}" for name in ARTIFACT_SEQUENCE[:artifact_index] if (self.run_dir / name).is_file())
+        if artifact_index > ARTIFACT_SEQUENCE.index("02-to-be-plan.md") and self.plan_addendum_path:
+            scope_evidence.append(self.plan_addendum_path)
+        if artifact_index > ARTIFACT_SEQUENCE.index("04-test-summary.md") and self.test_upstream_gap_addendum_path:
+            scope_evidence.append(self.test_upstream_gap_addendum_path)
+        scope_evidence.extend(["/.recursive/memory/skills/SKILLS.md", "/tiny_tasks.py", "/test_tiny_tasks.py", self.red_log, self.green_log, *(extra_evidence or [])])
+        scope_evidence_lines = "\n".join(f"  - `{path}`" for path in dict.fromkeys(scope_evidence))
+        ledger = self.repo_root / ledger_rel.lstrip("/")
+        snapshot = self.repo_root / pass_rel.lstrip("/")
+        previous_pass = "none"
+        previous_hash = "none"
+        if pass_number > 1:
+            previous_pass = f"/.recursive/run/{self.run_id}/evidence/reviews/{phase_key}/{review_id}/passes/{pass_number - 1:04d}.md"
+            previous_content = (self.repo_root / previous_pass.lstrip("/")).read_text(encoding="utf-8")
+            previous_hash = self.normalized_review_snapshot_hash(previous_content)
+        content = f"""## Review Scope
+
+- Review ID: {review_id}
+- Pass: {pass_id}
+- Ledger Path: `{ledger_rel}`
+- Previous Pass: {previous_pass if previous_pass == 'none' else f'`{previous_pass}`'}
+- Previous Pass Hash: {previous_hash}
+- Reviewed Artifact: `{bundle_path}`
+- Artifact Hash: {bundle_hash}
+- Diff Basis: `{bundle_path}`
+- Changed Files:
+  - `/tiny_tasks.py`
+  - `/test_tiny_tasks.py`
+- Evidence Basis:
+{scope_evidence_lines}
+
+## Findings
+
+- none
+
+## Verdict
+
+- Result: PASS
+- Open Findings: none
+- Pending Scheduled Handoffs: none
+- Controller: smoke-controller
+- Verified Pass: `{pass_rel}`
+- Verified Pass Hash: <pending>
+"""
+        snapshot_hash = self.normalized_review_snapshot_hash(content)
+        content = content.replace("- Verified Pass Hash: <pending>", f"- Verified Pass Hash: {snapshot_hash}")
+        write_text(snapshot, content)
+        write_text(ledger, content)
+
+        artifact_content = artifact.read_text(encoding="utf-8")
+        artifact_content = re.sub(r"(?m)^- Latest Verified Pass Hash:.*$", f"- Latest Verified Pass Hash: {snapshot_hash}", artifact_content)
+        artifact_content = re.sub(r"(?m)^- Review Bundle Hash:.*$", f"- Review Bundle Hash: {bundle_hash}", artifact_content)
+        write_text(artifact, artifact_content)
+        self.run_command(
+            self.script_command(
+                self.primary_toolchain(),
+                "recursive-review-ledger",
+                "--repo-root" if self.primary_toolchain() == "python" else "-RepoRoot",
+                str(self.repo_root),
+                "--run-id" if self.primary_toolchain() == "python" else "-RunId",
+                self.run_id,
+                "--phase-artifact" if self.primary_toolchain() == "python" else "-PhaseArtifact",
+                artifact_name,
+            ),
+            cwd=self.repo_root,
+        )
+        self.review_bundle_paths[artifact_name] = bundle_path
+        return bundle_path
+
+    def create_review_receipts(self) -> None:
+        primary = self.primary_toolchain()
+        self.lock_artifacts(["00-requirements.md", "00-worktree.md"])
+        for artifact_name in ("01-as-is.md", "02-to-be-plan.md"):
+            phase_key = AUDITED_PHASE_KEYS[artifact_name]
+            self.create_terminal_review(artifact_name, f"smoke-{phase_key}")
+            self.lock_artifact(primary, artifact_name)
+        self.lock_artifact(primary, "addenda/02-to-be-plan.addendum-01.md")
+        for artifact_name in ("03-implementation-summary.md", "03.5-code-review.md", "04-test-summary.md"):
+            phase_key = AUDITED_PHASE_KEYS[artifact_name]
+            review_id = "03-5-code-review-code-reviewer" if artifact_name == "03.5-code-review.md" else f"smoke-{phase_key}"
+            self.create_terminal_review(artifact_name, review_id)
+            self.lock_artifact(primary, artifact_name)
+        self.lock_artifacts(["addenda/04-test-summary.upstream-gap.02-to-be-plan.addendum-01.md", "05-manual-qa.md"])
+        for artifact_name in ("06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"):
+            phase_key = AUDITED_PHASE_KEYS[artifact_name]
+            self.create_terminal_review(artifact_name, f"smoke-{phase_key}")
+            self.lock_artifact(primary, artifact_name)
+        self.bundle_path = self.review_bundle_paths["03.5-code-review.md"]
 
     def update_control_plane_docs(self) -> None:
         append_text(
@@ -710,17 +852,18 @@ class SmokeHarness:
         self.memory_domain_path = self.repo_rel(domain_path)
 
     def header_block(self, phase_name: str, *, inputs: list[str], outputs: list[str], scope_note: str) -> str:
-        return dedent_block(
-            f"""
-            Run: `/.recursive/run/{self.run_id}/`
-            Phase: `{phase_name}`
-            Status: `DRAFT`
-            Inputs:
-            {list_block([quote_md(item) for item in inputs])}
-            Outputs:
-            {list_block([quote_md(item) for item in outputs])}
-            Scope note: {scope_note}
-            """
+        return "\n".join(
+            [
+                f"Run: `/.recursive/run/{self.run_id}/`",
+                f"Phase: `{phase_name}`",
+                "Status: `DRAFT`",
+                "Inputs:",
+                list_block([quote_md(item) for item in inputs]),
+                "Outputs:",
+                list_block([quote_md(item) for item in outputs]),
+                f"Scope note: {scope_note}",
+                "",
+            ]
         )
 
     def todo_section(self, items: list[str]) -> str:
@@ -782,8 +925,6 @@ class SmokeHarness:
         reviewed_paths: list[str],
         reconciliation: list[str],
         prior: list[str] | None = None,
-        gaps: list[str] | None = None,
-        repairs: list[str] | None = None,
         requirement_statuses: list[str] | None = None,
         subagent_records: list[str] | None = None,
     ) -> str:
@@ -831,14 +972,6 @@ class SmokeHarness:
         lines.extend(
             [
                 "",
-                "## Gaps Found",
-                "",
-                *[f"- {item}" for item in (gaps or ["None."])],
-                "",
-                "## Repair Work Performed",
-                "",
-                *[f"- {item}" for item in (repairs or ["No additional repair required after final review."])],
-                "",
                 "## Requirement Completion Status",
                 "",
                 *[
@@ -857,10 +990,14 @@ class SmokeHarness:
                     )
                 ],
                 "",
-                "## Audit Verdict",
+                "## Review Metadata",
                 "",
-                "- The artifact is grounded in the recorded inputs, owned diff scope, and resulting outputs.",
-                "Audit: PASS",
+                "- Review ID: <review-id>",
+                "- Review Ledger Path: `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/ledger.md`",
+                "- Latest Verified Pass: `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/passes/<NNNN>.md`",
+                "- Latest Verified Pass Hash: <sha256>",
+                "- Review Bundle Path: `/.recursive/run/<run-id>/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`",
+                "- Review Bundle Hash: <sha256>",
                 "",
             ]
         )
@@ -884,10 +1021,8 @@ class SmokeHarness:
                 "Earlier Phase Reconciliation",
                 "Subagent Contribution Verification",
                 "Worktree Diff Audit",
-                "Gaps Found",
-                "Repair Work Performed",
                 "Requirement Completion Status",
-                "Audit Verdict",
+                "Review Metadata",
             ]
         )
         updated = content
@@ -957,7 +1092,6 @@ class SmokeHarness:
                         outputs=[f"{run_prefix}/00-requirements.md"],
                         scope_note="Defines the stable requirement IDs for the disposable Tiny Tasks smoke run.",
                     ),
-                    "Workflow version: `recursive-mode-audit-v2`",
                     self.todo_section(
                         [
                             "Define requirement identifiers and acceptance criteria",
@@ -1166,6 +1300,10 @@ class SmokeHarness:
 
                         - Use strict RED/GREEN unittest logs captured under the run evidence directory.
 
+                        ## Test Surface
+
+                        - `TS-001` | Requirement: `R1` | Behavior: reports total, completed, and active task counts | Seam: `summarize_tasks(tasks) -> str` | Level: integration | Real Dependencies: none | Replaced Dependencies: none | Expected From: `R1` acceptance criterion for a two-task list
+
                         ## Playwright Plan (if applicable)
 
                         - Not applicable for the stdlib fixture app.
@@ -1276,6 +1414,7 @@ class SmokeHarness:
                         ## TDD Compliance Log
 
                         - TDD Mode: strict
+                        - Test Surface: TS-001
                         - RED Evidence: {quote_md(self.red_log)}
                         - GREEN Evidence: {quote_md(self.green_log)}
                         - REFACTOR Evidence: No separate refactor step was needed for this small fixture.
@@ -1306,7 +1445,7 @@ class SmokeHarness:
             ),
         )
 
-        anticipated_bundle_path = f"/.recursive/run/{self.run_id}/evidence/review-bundles/03-5-code-review-code-reviewer.md"
+        anticipated_bundle_path = f"/.recursive/run/{self.run_id}/evidence/review-bundles/phase-3-5/03-5-code-review-code-reviewer/0001.md"
 
         write_text(
             self.run_dir / "03.5-code-review.md",
@@ -1320,39 +1459,17 @@ class SmokeHarness:
                     ),
                     self.todo_section(
                         [
-                            "Capture review scope and alignment to the plan",
-                            "Record the review bundle path and verdict",
-                            "Pass the audited review gate before moving to Phase 4",
+                            "Capture the canonical review metadata pointers",
+                            "Keep findings in the lossless ledger rather than this receipt",
+                            "Pass Coverage and Approval only after whole-ledger PASS",
                         ]
                     ),
                     dedent_block(
-                        f"""
-                        ## Review Scope
+                        """
+                        ## Review Coordination
 
-                        - Reviewed `tiny_tasks.py` and `test_tiny_tasks.py` against {quote_md(f"{run_prefix}/02-to-be-plan.md")} and {quote_md(f"{run_prefix}/03-implementation-summary.md")}.
-                        - Prior recursive evidence reread: {quote_md('/.recursive/memory/skills/SKILLS.md')}.
-
-                        ## Plan Alignment Assessment
-
-                        - Re-read addendum {quote_md(self.plan_addendum_path)} and confirmed the implementation stayed within the pure-function, stdlib-only, and owned-scope constraints.
-
-                        ## Code Quality Assessment
-
-                        - The counting logic in `tiny_tasks.py` is direct, test-backed, and proportional to the fixture's scope.
-
-                        ## Issues Found
-
-                        - No blocking issues were found.
-
-                        ## Verdict
-
-                        - PASS. The implementation is ready for downstream test and QA summary artifacts.
-
-                        ## Review Metadata
-
-                        - Review Bundle Path: {quote_md(anticipated_bundle_path)}
-                        - Reviewer: local smoke harness
-                        - Review Scope: focused product diff review
+                        - The canonical ledger owns review scope, findings, controller verification, and verdict.
+                        - This phase receipt records only workflow evidence, traceability, and pointers to the immutable review artifacts.
                         """
                     ),
                     self.audit_sections(
@@ -1369,13 +1486,6 @@ class SmokeHarness:
                 ]
             ),
         )
-
-        self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
-        if self.bundle_path != anticipated_bundle_path:
-            raise SmokeError(
-                "Review bundle path mismatch: "
-                f"expected {anticipated_bundle_path}, generated {self.bundle_path}"
-            )
 
         write_text(
             test_gap_addendum_file,
@@ -1825,9 +1935,8 @@ class SmokeHarness:
                 ]
             )
         else:
-            self.lock_all()
-        self.bundle_path = self.generate_review_bundle(primary, "03-5-code-review-code-reviewer.md")
-        bundle_content = (self.run_dir / "evidence" / "review-bundles" / "03-5-code-review-code-reviewer.md").read_text(encoding="utf-8")
+            self.create_review_receipts()
+        bundle_content = (self.repo_root / self.bundle_path.lstrip("/")).read_text(encoding="utf-8")
         if self.plan_addendum_path.lstrip("/") not in bundle_content and self.plan_addendum_path not in bundle_content:
             raise SmokeError("Generated review bundle did not include the expected plan addendum.")
         for expected_skill_ref in (
@@ -1837,11 +1946,8 @@ class SmokeHarness:
                 raise SmokeError(f"Generated review bundle did not include expected skill-memory ref: {expected_skill_ref}")
         for toolchain in self.validation_toolchains():
             if toolchain != primary:
-                self.generate_review_bundle(toolchain, "03-5-code-review-parity.md")
-                self.parity_bundle_path = self.repo_rel(
-                    self.run_dir / "evidence" / "review-bundles" / "03-5-code-review-parity.md"
-                )
-                parity_bundle_content = (self.run_dir / "evidence" / "review-bundles" / "03-5-code-review-parity.md").read_text(encoding="utf-8")
+                self.parity_bundle_path = self.generate_review_bundle(toolchain, "03-5-code-review-parity.md")
+                parity_bundle_content = (self.repo_root / self.parity_bundle_path.lstrip("/")).read_text(encoding="utf-8")
                 if self.plan_addendum_path.lstrip("/") not in parity_bundle_content and self.plan_addendum_path not in parity_bundle_content:
                     raise SmokeError("Parity review bundle did not include the expected plan addendum.")
                 for expected_skill_ref in (
@@ -1854,8 +1960,6 @@ class SmokeHarness:
             verify_result = self.run_verify(toolchain)
             if "Current Phase: COMPLETE" not in status_result.stdout:
                 raise SmokeError(self.format_failure(f"{toolchain} status did not report completion", status_result))
-            if "Workflow Profile: recursive-mode-audit-v2" not in status_result.stdout:
-                raise SmokeError(self.format_failure(f"{toolchain} status did not report the v2 workflow profile", status_result))
             if require_subagent_review:
                 review_content = (self.run_dir / "03.5-code-review.md").read_text(encoding="utf-8")
                 if "Audit Execution Mode: subagent" not in review_content:
@@ -1872,150 +1976,112 @@ class SmokeHarness:
             self.summary.append(f"Verify duration {toolchain}: {verify_result.duration_seconds:.2f}s")
         self.summary.append("Positive addenda case passed.")
 
-    def prepare_subagent_review_path(
-        self,
-        *,
-        record_name: str,
-        purpose: str,
-        capability_probe: str,
-        delegation_basis: str,
-    ) -> str:
-        upstream_artifacts = [
-            f"/.recursive/run/{self.run_id}/00-requirements.md",
-            f"/.recursive/run/{self.run_id}/01-as-is.md",
-            f"/.recursive/run/{self.run_id}/02-to-be-plan.md",
-            f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
-        ]
+    def assert_subagent_review_path(self) -> None:
+        primary = self.primary_toolchain()
+        self.lock_artifacts(["00-requirements.md", "00-worktree.md"])
+        for artifact_name in ("01-as-is.md", "02-to-be-plan.md"):
+            self.create_terminal_review(artifact_name, f"smoke-{AUDITED_PHASE_KEYS[artifact_name]}")
+            self.lock_artifact(primary, artifact_name)
+        self.lock_artifact(primary, "addenda/02-to-be-plan.addendum-01.md")
+        self.create_terminal_review("03-implementation-summary.md", "smoke-phase-3")
+        self.lock_artifact(primary, "03-implementation-summary.md")
 
-        def build_action_command(bundle_path: str) -> list[str]:
-            command = self.script_command(
-                self.primary_toolchain(),
-                "recursive-subagent-action",
-                "--repo-root" if self.primary_toolchain() == "python" else "-RepoRoot",
-                str(self.repo_root),
-                "--run-id" if self.primary_toolchain() == "python" else "-RunId",
-                self.run_id,
-                "--subagent-id" if self.primary_toolchain() == "python" else "-SubagentId",
-                "reviewer-01",
-                "--phase" if self.primary_toolchain() == "python" else "-Phase",
-                "03.5 Code Review",
-                "--purpose" if self.primary_toolchain() == "python" else "-Purpose",
-                purpose,
-                "--execution-mode" if self.primary_toolchain() == "python" else "-ExecutionMode",
-                "review",
-                "--artifact-path" if self.primary_toolchain() == "python" else "-ArtifactPath",
-                f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
-                "--review-bundle" if self.primary_toolchain() == "python" else "-ReviewBundle",
-                bundle_path,
-            )
-            for upstream_artifact in upstream_artifacts:
-                command.extend(
-                    [
-                        "--upstream-artifact" if self.primary_toolchain() == "python" else "-UpstreamArtifact",
-                        upstream_artifact,
-                    ]
-                )
-            command.extend(
-                [
-                    "--action-taken" if self.primary_toolchain() == "python" else "-ActionTaken",
-                    "Re-read the implementation summary, review bundle, and changed files for requirement and diff alignment.",
-                    "--reviewed-file" if self.primary_toolchain() == "python" else "-ReviewedFile",
-                    "tiny_tasks.py",
-                    "--reviewed-file" if self.primary_toolchain() == "python" else "-ReviewedFile",
-                    "test_tiny_tasks.py",
-                    "--artifact-read" if self.primary_toolchain() == "python" else "-ArtifactRead",
-                    f"/.recursive/run/{self.run_id}/00-requirements.md",
-                    "--artifact-read" if self.primary_toolchain() == "python" else "-ArtifactRead",
-                    f"/.recursive/run/{self.run_id}/01-as-is.md",
-                    "--artifact-read" if self.primary_toolchain() == "python" else "-ArtifactRead",
-                    f"/.recursive/run/{self.run_id}/02-to-be-plan.md",
-                    "--artifact-read" if self.primary_toolchain() == "python" else "-ArtifactRead",
-                    f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
-                    "--evidence-used" if self.primary_toolchain() == "python" else "-EvidenceUsed",
-                    self.red_log,
-                    "--evidence-used" if self.primary_toolchain() == "python" else "-EvidenceUsed",
-                    self.green_log,
-                    "--finding" if self.primary_toolchain() == "python" else "-Finding",
-                    "No blocking issues remained after reviewing the final diff and evidence.",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    "tiny_tasks.py",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    "test_tiny_tasks.py",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    f"/.recursive/run/{self.run_id}/00-requirements.md",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    f"/.recursive/run/{self.run_id}/01-as-is.md",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    f"/.recursive/run/{self.run_id}/02-to-be-plan.md",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
-                    "--verification-path" if self.primary_toolchain() == "python" else "-VerificationPath",
-                    bundle_path,
-                    "--verification-item" if self.primary_toolchain() == "python" else "-VerificationItem",
-                    "Inspect the claimed file impact against the actual diff before accepting the delegated review.",
-                    "--verification-item" if self.primary_toolchain() == "python" else "-VerificationItem",
-                    "Cross-check the reviewed artifact, upstream artifacts, and bundle for stale delegated context.",
-                    "--output-name" if self.primary_toolchain() == "python" else "-OutputName",
-                    record_name,
-                ]
-            )
-            return command
-
+        review_id = "03-5-code-review-code-reviewer"
+        review_ledger = f"/.recursive/run/{self.run_id}/evidence/reviews/phase-3-5/{review_id}/ledger.md"
+        anticipated_bundle = f"/.recursive/run/{self.run_id}/evidence/review-bundles/phase-3-5/{review_id}/0001.md"
+        record_name = "delegated-review-action-record.md"
+        action_record_path = f"/.recursive/run/{self.run_id}/subagents/{record_name}"
         target = self.run_dir / "03.5-code-review.md"
-        broken = strip_lock_metadata(target.read_text(encoding="utf-8"))
-        broken = replace_field(broken, "Audit Execution Mode", "subagent")
-        broken = replace_field(broken, "Subagent Availability", "available")
-        broken = replace_field(broken, "Subagent Capability Probe", quote_md(capability_probe))
-        broken = replace_field(broken, "Delegation Decision Basis", quote_md(delegation_basis))
-        write_text(target, broken)
-        self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
-        self.run_command(build_action_command(self.bundle_path), cwd=self.repo_root)
-        self.subagent_action_record_path = f"/.recursive/run/{self.run_id}/subagents/{record_name}"
-        broken = target.read_text(encoding="utf-8")
-        broken = replace_section(
-            broken,
+        delegated = target.read_text(encoding="utf-8")
+        delegated = replace_field(delegated, "Audit Execution Mode", "subagent")
+        delegated = replace_field(delegated, "Subagent Availability", "available")
+        delegated = replace_field(delegated, "Subagent Capability Probe", quote_md("The disposable harness generated and validated a canonical delegated-review action record."))
+        delegated = replace_field(delegated, "Delegation Decision Basis", quote_md("The dedicated scenario exercises controller verification of a real persisted review action."))
+        delegated = replace_section(
+            delegated,
             "Subagent Contribution Verification",
             "\n".join(
                 [
-                    f"- Reviewed Action Records: {quote_md(self.subagent_action_record_path)}",
-                    (
-                        f"- Main-Agent Verification Performed: {quote_md('tiny_tasks.py')}, "
-                        f"{quote_md('test_tiny_tasks.py')}, "
-                        f"{quote_md(f'/.recursive/run/{self.run_id}/00-requirements.md')}, "
-                        f"{quote_md(f'/.recursive/run/{self.run_id}/01-as-is.md')}, "
-                        f"{quote_md(f'/.recursive/run/{self.run_id}/02-to-be-plan.md')}, "
-                        f"{quote_md(f'/.recursive/run/{self.run_id}/03-implementation-summary.md')}, "
-                        f"{quote_md(self.bundle_path)}"
-                    ),
+                    f"- Reviewed Action Records: {quote_md(action_record_path)}",
+                    f"- Main-Agent Verification Performed: {quote_md('tiny_tasks.py')}, {quote_md('test_tiny_tasks.py')}, {quote_md(anticipated_bundle)}",
                     "- Acceptance Decision: accepted",
-                    "- Refresh Handling: Action record was generated against the locked implementation artifact and refreshed after the latest review-bundle rewrite.",
+                    "- Refresh Handling: The final delegated-review receipt was bundled before controller verification and required no later author-owned change.",
                     "- Repair Performed After Verification: none",
                 ]
             ),
         )
-        write_text(target, broken)
-        self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
-        self.run_command(build_action_command(self.bundle_path), cwd=self.repo_root)
-        return self.subagent_action_record_path
+        write_text(target, delegated)
+        self.bundle_path = self.create_terminal_review("03.5-code-review.md", review_id)
+        upstream_artifacts = [
+            f"/.recursive/run/{self.run_id}/00-requirements.md",
+            f"/.recursive/run/{self.run_id}/00-worktree.md",
+            f"/.recursive/run/{self.run_id}/01-as-is.md",
+            f"/.recursive/run/{self.run_id}/02-to-be-plan.md",
+            f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
+        ]
+        reviewed_files = ["tiny_tasks.py", "test_tiny_tasks.py"]
+        action_command = self.script_command(
+            primary,
+            "recursive-subagent-action",
+            "--repo-root" if primary == "python" else "-RepoRoot",
+            str(self.repo_root),
+            "--run-id" if primary == "python" else "-RunId",
+            self.run_id,
+            "--subagent-id" if primary == "python" else "-SubagentId",
+            "reviewer-01",
+            "--phase" if primary == "python" else "-Phase",
+            "03.5 Code Review",
+            "--purpose" if primary == "python" else "-Purpose",
+            "Delegated review smoke scenario",
+            "--execution-mode" if primary == "python" else "-ExecutionMode",
+            "review",
+            "--artifact-path" if primary == "python" else "-ArtifactPath",
+            f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
+            "--review-bundle" if primary == "python" else "-ReviewBundle",
+            self.bundle_path,
+            "--review-ledger" if primary == "python" else "-ReviewLedger",
+            review_ledger,
+            "--action-taken" if primary == "python" else "-ActionTaken",
+            "Reviewed the immutable bundle, upstream artifacts, and changed product files.",
+            "--artifact-read" if primary == "python" else "-ArtifactRead",
+            f"/.recursive/run/{self.run_id}/03.5-code-review.md",
+            "--audit-question" if primary == "python" else "-AuditQuestion",
+            "Does the implementation satisfy R1 without widening scope?",
+            "--verification-path" if primary == "python" else "-VerificationPath",
+            "tiny_tasks.py",
+            "--verification-item" if primary == "python" else "-VerificationItem",
+            "Controller verified the action against the immutable bundle, ledger, and product diff.",
+            "--output-name" if primary == "python" else "-OutputName",
+            record_name,
+        )
+        if primary == "python":
+            for upstream_artifact in upstream_artifacts:
+                action_command.extend(["--upstream-artifact", upstream_artifact])
+            for reviewed_file in reviewed_files:
+                action_command.extend(["--reviewed-file", reviewed_file])
+        else:
+            action_command.extend(["-UpstreamArtifact", ",".join(upstream_artifacts)])
+            action_command.extend(["-ReviewedFile", ",".join(reviewed_files)])
+        self.run_command(action_command, cwd=self.repo_root)
+        self.subagent_action_record_path = action_record_path
+        self.lock_artifact(primary, "03.5-code-review.md")
 
-    def assert_subagent_review_path(self) -> None:
-        self.lock_artifacts(
-            [
-                "00-requirements.md",
-                "00-worktree.md",
-                "01-as-is.md",
-                "02-to-be-plan.md",
-                "addenda/02-to-be-plan.addendum-01.md",
-                "03-implementation-summary.md",
-            ]
-        )
-        self.prepare_subagent_review_path(
-            record_name="delegated-review-action-record.md",
-            purpose="Delegated review smoke scenario",
-            capability_probe="Controller confirmed a delegated-review surface was available for the dedicated subagent scenario.",
-            delegation_basis="This stricter smoke scenario proves Phase 3.5 can remain bundle-backed and subagent-audited through lock and downstream closeout.",
-        )
-        self.assert_positive_path(require_subagent_review=True)
+        self.create_terminal_review("04-test-summary.md", "smoke-phase-4")
+        self.lock_artifact(primary, "04-test-summary.md")
+        self.lock_artifacts(["addenda/04-test-summary.upstream-gap.02-to-be-plan.addendum-01.md", "05-manual-qa.md"])
+        for artifact_name in ("06-decisions-update.md", "07-state-update.md", "08-memory-impact.md"):
+            self.create_terminal_review(artifact_name, f"smoke-{AUDITED_PHASE_KEYS[artifact_name]}")
+            self.lock_artifact(primary, artifact_name)
+
+        for toolchain in self.validation_toolchains():
+            self.run_lint(toolchain, expect_success=True)
+            status_result = self.run_status(toolchain)
+            self.run_verify(toolchain)
+            if "Current Phase: COMPLETE" not in status_result.stdout:
+                raise SmokeError(self.format_failure(f"{toolchain} status did not report completion", status_result))
+        review_content = target.read_text(encoding="utf-8")
+        if "Audit Execution Mode: subagent" not in review_content or not (self.repo_root / action_record_path.lstrip("/")).is_file():
+            raise SmokeError("Subagent scenario did not preserve its delegated execution evidence.")
         self.summary.append("Dedicated subagent review scenario passed.")
 
     def negative_strict_tdd_case(self) -> None:
@@ -2222,51 +2288,8 @@ class SmokeHarness:
         finally:
             write_text(target, original)
 
-    def negative_context_free_review_case(self) -> None:
-        target = self.run_dir / "03.5-code-review.md"
-        original = target.read_text(encoding="utf-8")
-        broken = strip_lock_metadata(original)
-        broken = broken.replace(
-            f"- Reviewed `tiny_tasks.py` and `test_tiny_tasks.py` against {quote_md(f'/.recursive/run/{self.run_id}/02-to-be-plan.md')} and {quote_md(f'/.recursive/run/{self.run_id}/03-implementation-summary.md')}.",
-            "- Reviewed the implementation at a high level.",
-        )
-        broken = broken.replace(
-            f"- Re-read addendum {quote_md(self.plan_addendum_path)} and confirmed the implementation stayed within the pure-function, stdlib-only, and owned-scope constraints.",
-            "- The implementation generally seems aligned.",
-        )
-        broken = broken.replace(
-            "- The counting logic in `tiny_tasks.py` is direct, test-backed, and proportional to the fixture's scope.",
-            "- The implementation details seem reasonable.",
-        )
-        broken = broken.replace(
-            "- PASS. The implementation is ready for downstream test and QA summary artifacts.",
-            "- PASS. The implementation appears acceptable.",
-        )
-        write_text(target, broken)
-        self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
-        try:
-            for toolchain in self.validation_toolchains():
-                lint_result = self.run_lint(toolchain, expect_success=False)
-                combined = (lint_result.stdout + lint_result.stderr).lower()
-                if "review narrative does not cite" not in combined:
-                    raise SmokeError(self.format_failure(f"{toolchain} lint missed context-free review failure", lint_result))
-                status_result = self.run_status(toolchain)
-                status_text = (status_result.stdout + status_result.stderr).lower()
-                if "review narrative does not cite" not in status_text:
-                    raise SmokeError(self.format_failure(f"{toolchain} status missed context-free review blocker", status_result))
-                try:
-                    self.lock_artifact(toolchain, "03.5-code-review.md")
-                except SmokeError:
-                    pass
-                else:
-                    raise SmokeError(f"{toolchain} recursive-lock unexpectedly succeeded with a context-free review artifact.")
-            self.summary.append("Negative context-free review case passed.")
-        finally:
-            write_text(target, original)
-            self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
-
-    def negative_review_bundle_scope_case(self) -> None:
-        bundle_file = self.run_dir / "evidence" / "review-bundles" / "03-5-code-review-code-reviewer.md"
+    def negative_review_bundle_tamper_case(self) -> None:
+        bundle_file = self.repo_root / self.bundle_path.lstrip("/")
         original = bundle_file.read_text(encoding="utf-8")
         broken = replace_section(bundle_file.read_text(encoding="utf-8"), "Targeted Code References", "- `README.md`")
         write_text(bundle_file, broken)
@@ -2274,62 +2297,62 @@ class SmokeHarness:
             for toolchain in self.validation_toolchains():
                 lint_result = self.run_lint(toolchain, expect_success=False)
                 combined = (lint_result.stdout + lint_result.stderr).lower()
-                if "targeted code references" not in combined and "code ref" not in combined:
-                    raise SmokeError(self.format_failure(f"{toolchain} lint missed review-bundle scope failure", lint_result))
+                if "bundle hash" not in combined and "immutable bundle" not in combined:
+                    raise SmokeError(self.format_failure(f"{toolchain} lint missed immutable review-bundle tampering", lint_result))
                 status_result = self.run_status(toolchain)
                 status_text = (status_result.stdout + status_result.stderr).lower()
-                if "targeted code references" not in status_text and "code ref" not in status_text:
-                    raise SmokeError(self.format_failure(f"{toolchain} status missed review-bundle scope blocker", status_result))
-            self.summary.append("Negative review-bundle scope case passed.")
+                if "bundle hash" not in status_text and "immutable bundle" not in status_text:
+                    raise SmokeError(self.format_failure(f"{toolchain} status missed immutable review-bundle tampering", status_result))
+            self.summary.append("Negative immutable review-bundle tamper case passed.")
         finally:
             write_text(bundle_file, original)
 
     def positive_subagent_action_record_case(self) -> None:
-        target = self.run_dir / "03.5-code-review.md"
-        original = target.read_text(encoding="utf-8")
         record_name = "positive-review-action-record.md"
-        self.prepare_subagent_review_path(
-            record_name=record_name,
-            purpose="Positive delegated review validation",
-            capability_probe="Controller confirmed a delegated-review surface was available for this positive delegated-review validation.",
-            delegation_basis="Positive-case validation is exercising the formal subagent action-record path with a stable reviewed artifact.",
+        review_ledger = f"/.recursive/run/{self.run_id}/evidence/reviews/phase-3-5/03-5-code-review-code-reviewer/ledger.md"
+        command = self.script_command(
+            self.primary_toolchain(),
+            "recursive-subagent-action",
+            "--repo-root" if self.primary_toolchain() == "python" else "-RepoRoot",
+            str(self.repo_root),
+            "--run-id" if self.primary_toolchain() == "python" else "-RunId",
+            self.run_id,
+            "--subagent-id" if self.primary_toolchain() == "python" else "-SubagentId",
+            "reviewer-01",
+            "--phase" if self.primary_toolchain() == "python" else "-Phase",
+            "03.5 Code Review",
+            "--purpose" if self.primary_toolchain() == "python" else "-Purpose",
+            "Validate the completed review evidence",
+            "--execution-mode" if self.primary_toolchain() == "python" else "-ExecutionMode",
+            "review",
+            "--artifact-path" if self.primary_toolchain() == "python" else "-ArtifactPath",
+            f"/.recursive/run/{self.run_id}/03.5-code-review.md",
+            "--review-bundle" if self.primary_toolchain() == "python" else "-ReviewBundle",
+            self.bundle_path,
+            "--review-ledger" if self.primary_toolchain() == "python" else "-ReviewLedger",
+            review_ledger,
+            "--reviewed-file" if self.primary_toolchain() == "python" else "-ReviewedFile",
+            "tiny_tasks.py",
+            "--verification-item" if self.primary_toolchain() == "python" else "-VerificationItem",
+            "Controller should compare the action record with the immutable bundle and ledger.",
+            "--output-name" if self.primary_toolchain() == "python" else "-OutputName",
+            record_name,
         )
+        self.run_command(command, cwd=self.repo_root)
+        action_record_file = self.run_dir / "subagents" / record_name
         try:
-            for toolchain in self.validation_toolchains():
-                lint_result = self.run_lint(toolchain, expect_success=True)
-                self.lock_artifact(toolchain, "03.5-code-review.md")
-                self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
-                status_result = self.run_status(toolchain)
-                if "Current Phase: COMPLETE" not in status_result.stdout:
-                    raise SmokeError(self.format_failure(f"{toolchain} status did not report completion after locking the positive subagent action record", status_result))
-                self.summary.append(f"Positive subagent-action-record case passed for {toolchain} ({lint_result.duration_seconds:.2f}s).")
+            validation = self.run_command(
+                [str(self.python_exe), str(self.runtime_dir / "recursive_review_action.py"), "--repo-root", str(self.repo_root), "--action-record", self.repo_rel(action_record_file)],
+                cwd=self.repo_root,
+            )
+            self.summary.append(f"Positive subagent-action-record case passed ({validation.duration_seconds:.2f}s).")
         finally:
-            write_text(target, original)
-            action_record_file = self.run_dir / "subagents" / record_name
             if action_record_file.exists():
                 action_record_file.unlink()
-            self.subagent_action_record_path = ""
-            self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
 
     def negative_subagent_action_record_case(self) -> None:
-        target = self.run_dir / "03.5-code-review.md"
-        original = target.read_text(encoding="utf-8")
-        broken = strip_lock_metadata(original)
-        broken = replace_field(broken, "Audit Execution Mode", "subagent")
-        broken = replace_field(broken, "Subagent Availability", "available")
-        broken = replace_field(
-            broken,
-            "Subagent Capability Probe",
-            quote_md("Controller confirmed a delegated-review surface was available for this negative-case audit."),
-        )
-        broken = replace_field(
-            broken,
-            "Delegation Decision Basis",
-            quote_md("Negative-case validation is forcing delegated mode so the action-record checks are exercised."),
-        )
-        write_text(target, broken)
-        self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
         record_name = "negative-empty-action-record.md"
+        review_ledger = f"/.recursive/run/{self.run_id}/evidence/reviews/phase-3-5/03-5-code-review-code-reviewer/ledger.md"
         action_command = self.script_command(
             self.primary_toolchain(),
             "recursive-subagent-action",
@@ -2349,44 +2372,27 @@ class SmokeHarness:
             f"/.recursive/run/{self.run_id}/03.5-code-review.md",
             "--review-bundle" if self.primary_toolchain() == "python" else "-ReviewBundle",
             self.bundle_path,
+            "--review-ledger" if self.primary_toolchain() == "python" else "-ReviewLedger",
+            review_ledger,
             "--output-name" if self.primary_toolchain() == "python" else "-OutputName",
             record_name,
         )
         self.run_command(action_command, cwd=self.repo_root)
-        action_record_path = f"/.recursive/run/{self.run_id}/subagents/{record_name}"
-        broken = target.read_text(encoding="utf-8")
-        broken = replace_section(
-            broken,
-            "Subagent Contribution Verification",
-            "\n".join(
-                [
-                    f"- Reviewed Action Records: {quote_md(action_record_path)}",
-                    f"- Main-Agent Verification Performed: {quote_md('tiny_tasks.py')}, {quote_md('test_tiny_tasks.py')}, {quote_md(self.bundle_path)}",
-                    "- Acceptance Decision: accepted",
-                    "- Refresh Handling: Negative-case validation refreshed the record after rewriting the review receipt.",
-                    "- Repair Performed After Verification: none",
-                ]
-            ),
-        )
-        write_text(target, broken)
-        self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
+        action_record_file = self.run_dir / "subagents" / record_name
+        tampered = action_record_file.read_text(encoding="utf-8").replace("- Claims: none", "- Claims: none\n- Disposition: fixed")
+        write_text(action_record_file, tampered)
         try:
-            for toolchain in self.validation_toolchains():
-                lint_result = self.run_lint(toolchain, expect_success=False)
-                combined = (lint_result.stdout + lint_result.stderr).lower()
-                if "claimed file impact" not in combined and "claimed artifact impact" not in combined:
-                    raise SmokeError(self.format_failure(f"{toolchain} lint missed subagent action-record failure", lint_result))
-                status_result = self.run_status(toolchain)
-                status_text = (status_result.stdout + status_result.stderr).lower()
-                if "claimed file impact" not in status_text and "claimed artifact impact" not in status_text:
-                    raise SmokeError(self.format_failure(f"{toolchain} status missed subagent action-record blocker", status_result))
-            self.summary.append("Negative subagent-action-record case passed.")
+            validation = self.run_command(
+                [str(self.python_exe), str(self.runtime_dir / "recursive_review_action.py"), "--repo-root", str(self.repo_root), "--action-record", self.repo_rel(action_record_file)],
+                cwd=self.repo_root,
+                allowed_returncodes=(1,),
+            )
+            if "Disposition" not in validation.stdout and "schema" not in validation.stdout.lower():
+                raise SmokeError(self.format_failure("Action validator missed terminal-field tampering", validation))
+            self.summary.append("Negative subagent-action-record tamper case passed.")
         finally:
-            write_text(target, original)
-            action_record_file = self.run_dir / "subagents" / record_name
             if action_record_file.exists():
                 action_record_file.unlink()
-            self.bundle_path = self.generate_review_bundle(self.primary_toolchain(), "03-5-code-review-code-reviewer.md")
 
     def runtime_noise_case(self) -> None:
         pycache_dir = self.repo_root / "__pycache__"
@@ -2436,8 +2442,7 @@ class SmokeHarness:
         self.negative_phase2_mapping_case()
         self.negative_requirement_proof_case()
         self.negative_review_bundle_case()
-        self.negative_context_free_review_case()
-        self.negative_review_bundle_scope_case()
+        self.negative_review_bundle_tamper_case()
         self.negative_addenda_case()
         self.positive_subagent_action_record_case()
         self.negative_subagent_action_record_case()

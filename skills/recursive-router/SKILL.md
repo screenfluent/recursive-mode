@@ -100,12 +100,14 @@ Legacy compatibility aliases still resolve to these stage-aligned roles:
 ## Read Order
 
 1. Read `/.recursive/RECURSIVE.md`.
-2. Read `/skills/recursive-subagent/SKILL.md`.
+2. Read `../recursive-subagent/SKILL.md`.
 3. Read `/.recursive/config/recursive-router.json`.
 4. Read `/.recursive/config/recursive-router-discovered.json`.
 5. Read `/.recursive/memory/skills/SKILLS.md` plus any relevant delegated-review or capability notes when the phase is capability-sensitive.
 
 `recursive-mode` and `recursive-subagent` still own phase sequencing, audit standards, review-bundle rules, and acceptance criteria. Do not restate or weaken those here.
+
+The router does not own the finding schema, finding IDs, dispositions, or controller acceptance. It transports the named protocol, immutable bundle, ledger pointers, and candidate claims; the controller verifies the returned rows against the repository.
 
 ## Required Behavior
 
@@ -119,6 +121,7 @@ Legacy compatibility aliases still resolve to these stage-aligned roles:
 - Do **not** let a routed role choose its own phase, inputs, or acceptance standard.
 - Routed roles do not own final acceptance. The orchestrator remains responsible for the audit-repair loop and must keep repairing or rerouting until the phase gates actually pass.
 - Before dispatch, give the routed role a real context bundle: canonical review bundle or prompt bundle path, exact artifact paths, relevant upstream docs, required checks, and exact output shape.
+- For audited review, pass through `Review Protocol Path`, `Review Bundle Path`, `Review Ledger Path`, and the owning structured `## Claimed Findings` payload unchanged from the review/subagent contract.
 - Prefer brief dispatch prompts that point at canonical workflow artifacts such as `00-requirements.md`, `01-as-is.md`, `02-to-be-plan.md`, the active phase artifact, or a generated review bundle, instead of inventing a second router-specific workflow narrative.
 - Do **not** delegate using only vague file references such as "read the docs" when the routed model needs concrete context to succeed.
 - If a routed model has shown weak instruction-following, inline the specific requirement, artifact, or section excerpts needed for that assignment and reject any output that does not cite or follow them.
@@ -128,15 +131,15 @@ Legacy compatibility aliases still resolve to these stage-aligned roles:
 Use the router scripts to initialize, probe, validate, and resolve routing:
 
 ```bash
-python ./scripts/recursive-router-init.py --repo-root .
-python ./scripts/recursive-router-probe.py --repo-root . --json
-python ./scripts/recursive-router-configure.py --repo-root . --set code-reviewer=codex:gpt-5.4-mini --json
-python ./scripts/recursive-router-invoke.py --repo-root . --role code-reviewer --prompt-file "./.recursive/run/<run-id>/router-prompts/code-reviewer-bundle.md" --json
-python ./scripts/recursive-router-validate.py --repo-root .
-python ./scripts/recursive-router-resolve.py --repo-root . --role code-reviewer --json
-pwsh -NoProfile -File ./scripts/recursive-router-probe.ps1 -RepoRoot . -Json
-pwsh -NoProfile -File ./scripts/recursive-router-configure.ps1 -RepoRoot . -Set code-reviewer=codex:gpt-5.4-mini -Json
-pwsh -NoProfile -File ./scripts/recursive-router-invoke.ps1 -RepoRoot . -Role code-reviewer -PromptFile "./.recursive/run/<run-id>/router-prompts/code-reviewer-bundle.md" -Json
+python ./.recursive/scripts/recursive-router-init.py --repo-root .
+python ./.recursive/scripts/recursive-router-probe.py --repo-root . --json
+python ./.recursive/scripts/recursive-router-configure.py --repo-root . --set code-reviewer=codex:gpt-5.4-mini --json
+python ./.recursive/scripts/recursive-router-invoke.py --repo-root . --role code-reviewer --prompt-file "./.recursive/run/<run-id>/router-prompts/code-reviewer-bundle.md" --json
+python ./.recursive/scripts/recursive-router-validate.py --repo-root .
+python ./.recursive/scripts/recursive-router-resolve.py --repo-root . --role code-reviewer --json
+pwsh -NoProfile -File ./.recursive/scripts/recursive-router-probe.ps1 -RepoRoot . -Json
+pwsh -NoProfile -File ./.recursive/scripts/recursive-router-configure.ps1 -RepoRoot . -Set code-reviewer=codex:gpt-5.4-mini -Json
+pwsh -NoProfile -File ./.recursive/scripts/recursive-router-invoke.ps1 -RepoRoot . -Role code-reviewer -PromptFile "./.recursive/run/<run-id>/router-prompts/code-reviewer-bundle.md" -Json
 ```
 
 Built-in discovery targets are:
@@ -282,7 +285,7 @@ When routed delegation is used or attempted, phase artifacts and action records 
 - `Controller Orchestrator`
 - `Delegated Context Bundle`
 
-Use `scripts/recursive-subagent-action.py` or `.ps1` to capture routed action-record details such as:
+Use `.recursive/scripts/recursive-subagent-action.py` or `.ps1` to capture routed action-record details such as:
 
 - `Router Used`
 - `CLI Probe Summary`

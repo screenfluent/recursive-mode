@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_ROOT = REPO_ROOT / "scripts"
+SCRIPTS_ROOT = REPO_ROOT / "skills" / "recursive-mode" / "scripts"
 
 
 def write_text(path: Path, content: str) -> None:
@@ -389,7 +389,7 @@ class RecursiveRouterTests(unittest.TestCase):
             wrapper_path.chmod(0o755)
         return wrapper_path
 
-    def test_install_bootstrap_creates_router_policy_and_gitignores_local_discovery(self) -> None:
+    def test_install_bootstrap_creates_policy_and_gitignores_local_state(self) -> None:
         self.install_bootstrap()
 
         policy = self.load_json(self.policy_path())
@@ -404,6 +404,7 @@ class RecursiveRouterTests(unittest.TestCase):
         self.assertIsNone(policy["role_routes"]["analyst"]["model"])
         self.assertFalse(self.discovery_path().exists())
         self.assertIn("/.recursive/config/recursive-router-discovered.json", gitignore)
+        self.assertIn("/.recursive/local/reviews/", gitignore)
 
     def test_init_does_not_overwrite_existing_policy(self) -> None:
         self.install_bootstrap()
@@ -1138,7 +1139,7 @@ model = "kimi-for-coding"
         self.assertEqual(payload["output_text"], prompt_text)
         self.assertIn("<choice>STOP</choice>", payload["raw_stdout"])
         self.assertIn("--work-dir", invocation_args)
-        self.assertEqual(invocation_args[invocation_args.index("--work-dir") + 1], str(self.repo_root))
+        self.assertEqual(invocation_args[invocation_args.index("--work-dir") + 1], str(self.repo_root.resolve()))
         self.assertIn("--output-format", invocation_args)
         self.assertEqual(invocation_args[invocation_args.index("--output-format") + 1], "stream-json")
         self.assertIn("--max-ralph-iterations", invocation_args)

@@ -42,7 +42,7 @@ Required recursive-mode audit behavior:
 - If the context bundle is incomplete, do not delegate; perform the audit yourself and record `Audit Execution Mode: self-audit`.
 - If subagents are available and the context bundle is complete, delegated audit/review is the default path.
 - If subagents are available but the controller still chooses `self-audit`, record a concrete `Delegation Override Reason`.
-- Do not set `Coverage: PASS` or `Approval: PASS` for an audited phase unless the artifact ends with `Audit: PASS`.
+- For every audited phase, do not set `Coverage: PASS` or `Approval: PASS` until the canonical review ledger reaches whole-ledger PASS.
 - Record `Subagent Capability Probe` and `Delegation Decision Basis` in every audited phase.
 - If meaningful subagent work contributes to a phase, require a durable action record under `/.recursive/run/<run-id>/subagents/` and verify it against actual files, actual recursive artifacts, and the actual diff before acceptance. For review/audit delegation, prefer a stable reviewed artifact for `Current Artifact`.
 - Store routed assistant output, raw transcripts, stdout/stderr captures, and invocation metadata under `/.recursive/run/<run-id>/evidence/router/`; cite them from action records rather than placing raw transcript Markdown directly under `subagents/`.
@@ -51,9 +51,10 @@ Required recursive-mode audit behavior:
 - If delegated work is accepted after main-agent checks reveal issues, record the concrete repair performed after verification; do not accept stale delegated context silently.
 - For Phase 3, declare `TDD Mode: strict|pragmatic`. Strict mode requires RED and GREEN evidence paths. Pragmatic mode requires an explicit exception rationale plus compensating evidence.
 - For Phase 5, declare `QA Execution Mode: human|agent-operated|hybrid`. Human and hybrid require user sign-off. Agent-operated and hybrid require execution metadata plus evidence paths.
-- For delegated review, prefer `recursive-review-bundle` and record `Review Bundle Path` in Phase 3.5 when review is delegated.
+- For delegated review, prefer `recursive-review-bundle`. Every audited phase records immutable per-pass bundle and canonical ledger pointers; self-audit uses the same ledger and preserves prior IDs.
 - Treat addenda as authoritative effective inputs. If relevant addenda exist, list them in `Inputs`, re-read them, and reconcile them explicitly.
-- Review bundles should include relevant addenda automatically, and the written review should cite upstream artifacts, relevant addenda, prior recursive evidence, and changed files/code refs from that bundle in the review narrative.
+- Review bundles should include relevant addenda automatically. Reviewer and self-audit output has exactly `## Review Scope`, `## Findings`, and `## Verdict`; every issue is a stable `F-*` row, and any reviewed-surface change refreshes the bundle and advances the pass.
+- Treat every delegated report and repair result as candidate claims. The controller verifies every finding row against the actual diff, artifacts, owning contract, and named check before terminalizing it.
 - Audited phases must include machine-checkable `Requirement Completion Status` entries for every in-scope `R#`; Traceability alone is not enough.
 - `implemented` and `verified` requirement dispositions must cite concrete `Changed Files`, and `verified` also requires distinct verification evidence.
 - `00-worktree.md` is the source of truth for diff basis. Record baseline type/reference, comparison reference, normalized baseline/comparison, and normalized diff command; do not silently substitute a different basis later.
@@ -96,4 +97,6 @@ Diff ownership rules:
 Locking rule:
 
 - Use `recursive-lock` as the primary supported way to write `Status: LOCKED`, `LockedAt`, and `LockHash`.
+- `recursive-lock` enforces monotonic phase gating: all earlier phases that exist in the run directory must be LOCKED before the target phase can be locked.
+- To reopen a locked artifact (reset to DRAFT and invalidate downstream receipts), pass `--reopen` to `recursive-lock`.
 <!-- RECURSIVE-MODE-AGENTS:END -->

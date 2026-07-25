@@ -5,51 +5,54 @@
 ## Usage Pattern
 
 ```text
-Generate a recursive review bundle for run <run-id> phase 03.5 using the canonical bundle format.
+Generate pass <NNNN> of review <review-id> for recursive run <run-id> and audited phase <phase>.
 ```
 
-## Script (Recommended)
+## Script
+
+```bash
+python3 "<SKILL_DIR>/scripts/recursive-review-bundle.py" \
+  --repo-root . \
+  --run-id "<run-id>" \
+  --phase "03.5 Code Review" \
+  --role code-reviewer \
+  --review-id code-review \
+  --pass 0001 \
+  --artifact-path "/.recursive/run/<run-id>/03.5-code-review.md" \
+  --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" \
+  --upstream-artifact "/.recursive/run/<run-id>/02-to-be-plan.md" \
+  --upstream-artifact "/.recursive/run/<run-id>/03-implementation-summary.md" \
+  --audit-question "Which accepted requirements remain incomplete?" \
+  --audit-question "Which changed files drift from the approved plan?"
+```
 
 ```powershell
-python "<SKILL_DIR>/scripts/recursive-review-bundle.py" --repo-root . --run-id "<run-id>" --phase "03.5 Code Review" --role code-reviewer --artifact-path "/.recursive/run/<run-id>/03.5-code-review.md" --upstream-artifact "/.recursive/run/<run-id>/00-requirements.md" --upstream-artifact "/.recursive/run/<run-id>/02-to-be-plan.md" --upstream-artifact "/.recursive/run/<run-id>/03-implementation-summary.md" --routing-config-path ".recursive/config/recursive-router.json" --routing-discovery-path ".recursive/config/recursive-router-discovered.json" --routed-cli "codex" --routed-model "gpt-5.4" --audit-question "Which R# remain incomplete?" --audit-question "Which changed files drift from the plan?" --required-output "Findings ordered by severity"
-
-pwsh -NoProfile -File "<SKILL_DIR>/scripts/recursive-review-bundle.ps1" -RepoRoot . -RunId "<run-id>" -Phase "03.5 Code Review" -Role code-reviewer -ArtifactPath "/.recursive/run/<run-id>/03.5-code-review.md" -UpstreamArtifact "/.recursive/run/<run-id>/00-requirements.md","/.recursive/run/<run-id>/02-to-be-plan.md","/.recursive/run/<run-id>/03-implementation-summary.md" -PriorRef "/.recursive/memory/MEMORY.md" -RoutingConfigPath ".recursive/config/recursive-router.json" -RoutingDiscoveryPath ".recursive/config/recursive-router-discovered.json" -RoutedCli "codex" -RoutedModel "gpt-5.4" -AuditQuestion "Which R# remain incomplete?","Which changed files drift from the plan?" -RequiredOutput "Findings ordered by severity"
+pwsh -NoProfile -File "<SKILL_DIR>/scripts/recursive-review-bundle.ps1" `
+  -RepoRoot . `
+  -RunId "<run-id>" `
+  -Phase "03.5 Code Review" `
+  -Role code-reviewer `
+  -ReviewId code-review `
+  -ReviewPass 0001 `
+  -ArtifactPath "/.recursive/run/<run-id>/03.5-code-review.md" `
+  -UpstreamArtifact "/.recursive/run/<run-id>/00-requirements.md","/.recursive/run/<run-id>/02-to-be-plan.md","/.recursive/run/<run-id>/03-implementation-summary.md" `
+  -AuditQuestion "Which accepted requirements remain incomplete?","Which changed files drift from the approved plan?"
 ```
 
-Example for a Phase 4 test-review bundle:
-
-```powershell
-python "<SKILL_DIR>/scripts/recursive-review-bundle.py" --repo-root . --run-id "<run-id>" --phase "04 Test Summary" --role tester --artifact-path "/.recursive/run/<run-id>/04-test-summary.md" --upstream-artifact "/.recursive/run/<run-id>/02-to-be-plan.md" --upstream-artifact "/.recursive/run/<run-id>/03-implementation-summary.md" --evidence-ref "/.recursive/run/<run-id>/evidence/logs/green/tests.log" --audit-question "Are the executed tests sufficient for the changed behavior?" --required-output "Audit recommendation"
-```
+Repeat the relevant upstream, addendum, prior-evidence, control-document, code, evidence and audit-question options as needed. Supply a stable review ID explicitly; when it is omitted, the generator derives one from the phase and role. Add routing paths, CLI and model only when routed delegation applies. The generator discovers relevant addenda and matching recursive skill memory by default; disable addendum discovery only with `--no-auto-addenda` or `-NoAutoAddenda`.
 
 ## What It Writes
 
-- A markdown review bundle under `/.recursive/run/<run-id>/evidence/review-bundles/`
-- Artifact content hash for stale-bundle detection
-- Diff basis from `00-worktree.md`
-- Current changed file list
-- Upstream artifact list
-- Relevant addenda auto-discovered by default
-- Prior recursive evidence refs when supplied
-- Code refs, evidence refs, audit questions, and required output hints
-- Routed review metadata such as `Routing Config Path`, `Routing Discovery Path`, `Routed CLI`, and `Routed Model`
+- One immutable bundle at `/.recursive/run/<run-id>/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`.
+- The reviewed artifact hash, audit-payload hash, executable diff basis and current changed-file snapshot.
+- The upstream artifacts, discovered addenda and memory, supplied control/code/evidence references, audit questions and routing context.
+- The canonical ledger path at `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/ledger.md`.
+- The fixed review-output contract owned by `recursive-review`: `## Review Scope`, `## Findings` and `## Verdict`, with stable `F-*` records under `## Findings`.
 
-## Phase 3.5 Expectation
+The generator refuses a phase label or artifact path that does not match the audited-phase registry, a review ID reused under another phase, an invalid pass ID, a non-executable diff basis, a missing reviewed artifact, or an attempt to overwrite an existing bundle.
 
-When review is delegated, record the generated bundle path in `03.5-code-review.md`:
+## Record the Bundle
 
-```md
-## Review Metadata
+Record the review ID, bundle path and hash, ledger path, and verified-pass pointers through the exact six-field `## Review Metadata` schema in the installed `recursive-mode` artifact template. Routing details belong in the generated bundle or delegated action record, not as replacement fields in `## Review Metadata`.
 
-- Review Bundle Path: `/.recursive/run/<run-id>/evidence/review-bundles/<bundle>.md`
-- Routing Config Path: `/.recursive/config/recursive-router.json`
-- Routing Discovery Path: `/.recursive/config/recursive-router-discovered.json`
-- Routed CLI: `codex`
-- Routed Model: `gpt-5.4`
-```
-
-If repairs materially change scope, changed files, or evidence, regenerate the bundle before re-audit.
-
-If meaningful subagent work follows from the delegated review, capture that work in a matching action record under `/.recursive/run/<run-id>/subagents/`.
-
-The maintainer smoke harness uses the same bundle contract, so this file is also the reference shape for automated regression runs.
+Regenerate after any change to the reviewed diff, artifact or evidence basis by incrementing the pass ID; immutable bundles are never overwritten. Load `recursive-review` before consuming the bundle, and use `recursive-subagent` with the installed `recursive-subagent-action` runtime when delegated work produces a structured action record.

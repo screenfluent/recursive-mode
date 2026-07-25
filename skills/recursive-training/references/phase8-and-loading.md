@@ -103,7 +103,32 @@ Use one or the other, not both for the same retrieval step.
 Common outcomes:
 
 - no training scripts installed -> explain that recursive-mode bootstrap must run first
-- no completed runs -> explain why extraction is skipped
-- only one completed run -> explain that extraction needs more evidence
-- extractor unavailable -> surface that training could not run
-- no learnings extracted -> report that the available runs did not yield reusable signal
+- fewer than 2 Phase-8-locked runs -> trigger exits `3` and explains that extraction needs more evidence
+- extractor unavailable -> exit `2`; do not claim memory updates
+- no learnings extracted / insufficient groups -> exit `3`; do not claim memory updates
+- successful write -> exit `0` and refresh the MEMORY.md training registry markers
+
+## Extractor contract
+
+`recursive-training-grpo.py` never embeds an LLM client. It always delegates prompt evaluation to `recursive-training-extract.py`.
+
+Wire extraction with one of:
+
+```bash
+# Agent/offline response
+python .recursive/scripts/recursive-training-extract.py \
+  --repo-root . --prompt-file prompt.txt --response-file items.json
+
+# External command (placeholders: {prompt_file}, {repo_root})
+set RECURSIVE_TRAINING_EXTRACTOR_CMD=my-extractor --prompt {prompt_file}
+```
+
+## Incremental mode
+
+`--incremental --run-id <id>` keeps the target run **and** other Phase-8-locked peers that share its inferred subsystem. It does not train on a single-run group alone.
+
+`recursive-training-phase8-trigger.py --auto` tries incremental first; if that returns exit `3` (zero items), it falls back to full Phase-8-locked training before giving up.
+
+## Closeout hook
+
+Re-running `recursive-closeout --phase 08` after Phase 8 is already locked invokes `recursive-training-phase8-trigger.py --auto`. First lock via `recursive-lock` does not auto-train; agents should run the trigger (or that closeout re-run) explicitly.
