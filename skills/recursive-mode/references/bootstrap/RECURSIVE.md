@@ -126,6 +126,8 @@ Required per-run artifacts:
 - `addenda/` (see Addenda policy)
 - `evidence/` (standardized evidence artifacts; screenshots/logs/perf/traces)
 
+When research belongs to an active run, store its cited report under `evidence/research/`; it becomes authoritative only through the phase artifact that consumes verified conclusions. Create no default `docs/research/` plane.
+
 The run folder is the durable record for the requirement. It must be sufficient to understand and reproduce work without relying on chat logs.
 
 When beginning a new run, use `/.recursive/DECISIONS.md` to locate earlier run folders relevant to the current requirement or AS-IS analysis. If any are found, read only the prior run artifacts most relevant to the same subsystem, workflow, or architectural area being changed. If none are found, skip this step.
@@ -490,6 +492,8 @@ Phase 2 — TO-BE plan (ExecPlan-grade)
 - Input: `01-as-is.md` (plus addenda) and by reference `00-requirements.md`
 - If Phase 1.5 exists: also input `01.5-root-cause.md` (plus addenda)
 - Output: `02-to-be-plan.md`
+- When `recursive-codebase-design` applies, use it inside Phase 2 and follow its owned applicability, module design, program design, Design It Twice, and human test-surface seam confirmation contracts. Write accepted design into `02-to-be-plan.md`; do not create a separate design phase or artifact.
+- When a design question needs an empirical answer, use `recursive-prototype` before Phase 2 lock, not through an addendum or as a Phase 3 side quest; keep prototype source on its throwaway branch/worktree and store only its report, commands, and commit pointer under `evidence/prototypes/`.
 - Audit must fail unless:
   - every Phase 1 source-inventory item is accounted for
   - targeted files/modules are concrete
@@ -512,6 +516,7 @@ Phase 3 — Implementation (TDD discipline)
 - Must include TDD Compliance Log documenting RED-GREEN-REFACTOR cycles or the explicit pragmatic exception
 - Every effective Phase 2 `TS-*` record must be cited in the TDD Compliance Log or the explicit pragmatic exception; Phase 3 may not invent a test seam
 - All planned behaviors must have tests written before implementation at their approved seams
+- When accepted design cites prototype logic, apply `recursive-tdd`'s Prototype handoff before GREEN.
 - Audit must reconcile:
   - `00-requirements.md`
   - `02-to-be-plan.md`
