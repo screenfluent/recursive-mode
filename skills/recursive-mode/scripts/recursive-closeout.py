@@ -505,7 +505,10 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    run_dir = repo_root / ".recursive" / "run" / args.run_id.strip()
+    if not phase_rules_registry.is_canonical_run_id(args.run_id):
+        print(f"[FAIL] {phase_rules_registry.CANONICAL_RUN_ID_ERROR}")
+        return 1
+    run_dir = repo_root / ".recursive" / "run" / args.run_id
     if not run_dir.exists():
         print(f"[FAIL] Run directory not found: {run_dir}")
         return 1

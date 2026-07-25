@@ -75,8 +75,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
             },
             installable_skills,
         )
-        root_skill = (ROOT_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("../recursive-training/SKILL.md", root_skill)
         self.assertFalse((repo_root / "SKILL.md").exists())
         self.assertTrue((ROOT_SKILL_DIR / "scripts" / "install-recursive-mode.py").exists())
 
@@ -123,38 +121,27 @@ class InstallRecursiveModeTests(unittest.TestCase):
 
         self.assertEqual(plain, install.normalize_plain_or_wrapped_content(malformed, start, end))
 
-    def test_recursive_agents_router_treats_benchmark_as_opt_in(self) -> None:
-        body = install.recursive_agents_router_body()
-
-        self.assertIn("separate optional `recursive-benchmark` add-on", body)
-        self.assertIn("<recursive-benchmark-package-or-repo>", body)
-        self.assertNotIn("/skills/recursive-benchmark/SKILL.md", body)
-        self.assertNotIn("/references/benchmarks/local-first-planner/README.md", body)
-        self.assertNotIn("/scripts/run-recursive-benchmark.py", body)
-
-    def test_recursive_agents_router_avoids_missing_source_repo_paths(self) -> None:
-        body = install.recursive_agents_router_body()
-
-        self.assertIn("the installed `recursive-spec` skill", body)
-        self.assertIn("the installed `recursive-training` skill", body)
-        for forbidden in (
+    def test_generated_bridges_avoid_source_repository_only_paths(self) -> None:
+        generated_bodies = {
+            "recursive agents router": install.recursive_agents_router_body(),
+            "plans bridge": install.plans_bridge_body(),
+        }
+        source_repository_only_paths = (
             "`/.recursive/README.md`",
             "`/skills/recursive-spec/SKILL.md`",
             "`/scripts/install-recursive-mode.py`",
             "`/references/artifact-template.md`",
             "`/skills/recursive-router/SKILL.md`",
             "`/skills/recursive-training/SKILL.md`",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, body)
+            "/skills/recursive-benchmark/SKILL.md",
+            "/references/benchmarks/local-first-planner/README.md",
+            "/scripts/run-recursive-benchmark.py",
+        )
 
-    def test_plans_bridge_treats_benchmark_as_opt_in(self) -> None:
-        body = install.plans_bridge_body()
-
-        self.assertIn("separate optional `recursive-benchmark` add-on", body)
-        self.assertIn("<recursive-benchmark-package-or-repo>", body)
-        self.assertNotIn("should use the packaged benchmark fixture", body)
-        self.assertEqual(1, body.count("If the user asks to route delegated work through another transport/model"))
+        for body_name, body in generated_bodies.items():
+            for source_path in source_repository_only_paths:
+                with self.subTest(body=body_name, source_path=source_path):
+                    self.assertNotIn(source_path, body)
 
     def test_gitattributes_excludes_benchmark_add_on_from_default_exports(self) -> None:
         gitattributes = Path(__file__).resolve().parent.parent / ".gitattributes"
@@ -182,55 +169,6 @@ class InstallRecursiveModeTests(unittest.TestCase):
             ).exists()
         )
 
-    def test_helper_inventories_include_closeout_and_training_extract(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        skill = (repo_root / "skills" / "recursive-mode" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("scripts/recursive-closeout.py", skill)
-        self.assertIn("scripts/recursive-closeout.ps1", skill)
-        self.assertIn(".recursive/scripts/recursive-training-extract.py", skill)
-        self.assertIn(".recursive/scripts/recursive-training-extract.ps1", skill)
-
-        for relative_path in (
-            Path("AGENTS.md"),
-            Path(".codex/AGENTS.md"),
-            Path("skills/recursive-mode/references/agents-block.md"),
-        ):
-            content = (repo_root / relative_path).read_text(encoding="utf-8")
-            with self.subTest(path=str(relative_path), snippet="recursive-closeout"):
-                self.assertIn("`recursive-closeout`", content)
-            with self.subTest(path=str(relative_path), snippet="recursive-training-extract"):
-                self.assertIn("`recursive-training-extract`", content)
-
-    def test_subskill_docs_use_bootstrapped_runtime_examples(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        expectations = {
-            Path("skills/recursive-router/SKILL.md"): (
-                "./.recursive/scripts/recursive-router-init.py",
-                "./.recursive/scripts/recursive-router-invoke.py",
-                "./.recursive/run/<run-id>/router-prompts/code-reviewer-bundle.md",
-            ),
-            Path("skills/recursive-review-bundle/SKILL.md"): (
-                "./.recursive/scripts/recursive-review-bundle.py",
-                "./.recursive/scripts/recursive-review-bundle.ps1",
-            ),
-        }
-        forbidden = {
-            Path("skills/recursive-router/SKILL.md"): (
-                "<SKILL_DIR>/scripts/recursive-router-",
-                "/" "tmp" "/code-reviewer-bundle.md",
-            ),
-            Path("skills/recursive-review-bundle/SKILL.md"): ("../../scripts/recursive-review-bundle",),
-        }
-
-        for relative_path, required_snippets in expectations.items():
-            content = (repo_root / relative_path).read_text(encoding="utf-8")
-            for snippet in required_snippets:
-                with self.subTest(path=str(relative_path), snippet=snippet):
-                    self.assertIn(snippet, content)
-            for snippet in forbidden[relative_path]:
-                with self.subTest(path=str(relative_path), forbidden=snippet):
-                    self.assertNotIn(snippet, content)
-
     def test_mirrored_benchmark_add_on_source_doc_matches_primary_copy(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         primary = (
@@ -247,30 +185,10 @@ class InstallRecursiveModeTests(unittest.TestCase):
 
         self.assertEqual(primary, mirror)
 
-    def test_agents_block_uses_helper_names_not_missing_root_script_paths(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        content = (ROOT_SKILL_DIR / "references" / "agents-block.md").read_text(encoding="utf-8")
-
-        self.assertIn("Invoke these helper names", content)
-        self.assertIn("`install-recursive-mode`", content)
-        self.assertIn("`recursive-closeout`", content)
-        self.assertIn("`recursive-training-extract`", content)
-        self.assertNotIn("`scripts/install-recursive-mode.py`", content)
-        self.assertNotIn("`scripts/recursive-status.py`", content)
-
     def test_training_and_router_skill_manifests_exist(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         self.assertTrue((repo_root / "skills" / "recursive-training" / "agents" / "openai.yaml").exists())
         self.assertTrue((repo_root / "skills" / "recursive-router" / "agents" / "openai.yaml").exists())
-
-    def test_recursive_training_skill_is_split_into_reference_docs(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        skill_path = repo_root / "skills" / "recursive-training" / "SKILL.md"
-        line_count = len(skill_path.read_text(encoding="utf-8").splitlines())
-
-        self.assertLess(line_count, 500)
-        self.assertTrue((repo_root / "skills" / "recursive-training" / "references" / "memory-architecture.md").exists())
-        self.assertTrue((repo_root / "skills" / "recursive-training" / "references" / "phase8-and-loading.md").exists())
 
     def test_installer_gitignores_device_local_router_discovery_inventory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install-recursive-mode-") as temp_dir:

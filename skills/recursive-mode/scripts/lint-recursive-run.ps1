@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RunId = "",
+    [AllowEmptyString()][string]$RunId = "",
     [string]$RepoRoot = (Get-Location).Path,
     [switch]$AllRuns,
     [switch]$Strict
@@ -17,7 +17,7 @@ if (-not $python) {
 
 $scriptPath = Join-Path $PSScriptRoot "lint-recursive-run.py"
 $argsList = @($scriptPath, "--repo-root", $RepoRoot)
-if ($RunId) { $argsList += @("--run-id", $RunId) }
+if ($PSBoundParameters.ContainsKey("RunId")) { $argsList += @("--run-id", $RunId) }
 if ($AllRuns.IsPresent) { $argsList += "--all-runs" }
 if ($Strict.IsPresent) { $argsList += "--strict" }
 

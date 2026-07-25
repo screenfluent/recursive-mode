@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$RunId,
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RunId,
     [Parameter(Mandatory = $true)][string]$Artifact,
     [string]$RepoRoot = (Get-Location).Path
 )

@@ -17,7 +17,6 @@ import recursive_review_ledger as review_ledger_contract
 
 
 FINDING_ID_RE = re.compile(r"F-[0-9]{3,}")
-RUN_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 CLAIMED_OUTCOMES = {"none", "fixed", "blocked"}
 REVIEW_PROTOCOL_PATH = ".agents/skills/recursive-review/references/finding-protocol.md"
 REVIEW_EXECUTION_TOKENS = {"review", "reviewer", "audit", "auditor", "repair", "repairer"}
@@ -160,9 +159,9 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    run_id = args.run_id.strip()
-    if not RUN_ID_RE.fullmatch(run_id):
-        print("[FAIL] Run ID must be a canonical kebab-case directory name.")
+    run_id = args.run_id
+    if not phase_rules.is_canonical_run_id(run_id):
+        print(f"[FAIL] {phase_rules.CANONICAL_RUN_ID_ERROR}")
         return 1
     run_root = repo_root / ".recursive" / "run"
     run_dir = run_root / run_id
@@ -206,7 +205,7 @@ def main() -> int:
     if review_mode and review_ledger:
         expected_phase_key = audited_phase_key or ("phase-3-5" if is_phase_3_5(args.phase) else None)
         ledger_match = re.fullmatch(
-            rf"[.]recursive/run/{re.escape(args.run_id.strip())}/evidence/reviews/{re.escape(expected_phase_key or 'invalid-phase')}/(?P<review_id>[a-z0-9]+(?:-[a-z0-9]+)*)/ledger[.]md",
+            rf"[.]recursive/run/{re.escape(run_id)}/evidence/reviews/{re.escape(expected_phase_key or 'invalid-phase')}/(?P<review_id>[a-z0-9]+(?:-[a-z0-9]+)*)/ledger[.]md",
             review_ledger,
         )
         if not ledger_match:
@@ -224,7 +223,7 @@ def main() -> int:
             return 1
         review_id = ledger_match.group("review_id") if ledger_match else "invalid-review"
         bundle_match = re.fullmatch(
-            rf"[.]recursive/run/{re.escape(args.run_id.strip())}/evidence/review-bundles/{re.escape(audited_phase_key or 'invalid-phase')}/{re.escape(review_id)}/(?P<review_pass>[0-9]{{4}})[.]md",
+            rf"[.]recursive/run/{re.escape(run_id)}/evidence/review-bundles/{re.escape(audited_phase_key or 'invalid-phase')}/{re.escape(review_id)}/(?P<review_pass>[0-9]{{4}})[.]md",
             bundle_path,
         )
         if not bundle_match or int(bundle_match.group("review_pass")) == 0:
@@ -305,7 +304,7 @@ def main() -> int:
         "",
         "## Metadata",
         f"- Subagent ID: `{args.subagent_id.strip()}`",
-        f"- Run ID: `{args.run_id.strip()}`",
+        f"- Run ID: `{run_id}`",
         f"- Phase: `{args.phase.strip()}`",
         f"- Purpose: `{args.purpose.strip()}`",
         f"- Execution Mode: `{args.execution_mode.strip()}`",

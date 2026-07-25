@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 from pathlib import Path
 
+import recursive_phase_rules as phase_rules_registry
 
 EVIDENCE_SUBDIRECTORIES = ("screenshots", "logs", "perf", "traces", "reviews", "review-bundles", "router", "other")
 import re
@@ -18,7 +19,6 @@ import stat
 import subprocess
 import sys
 
-RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -394,8 +394,8 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Overwrite existing 00-requirements.md.")
     args = parser.parse_args()
 
-    if not RUN_ID_RE.fullmatch(args.run_id):
-        print("[FAIL] Run ID must be a canonical kebab-case directory name.")
+    if not phase_rules_registry.is_canonical_run_id(args.run_id):
+        print(f"[FAIL] {phase_rules_registry.CANONICAL_RUN_ID_ERROR}")
         return 1
 
     repo_root = Path(args.repo_root).resolve()

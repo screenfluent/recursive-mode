@@ -1785,7 +1785,7 @@ def print_phase_status(phases: list[dict[str, str]], states: dict[str, ArtifactS
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show recursive-mode run status and lock-chain summary.")
-    parser.add_argument("--run-id", default="", help="Run ID to inspect (default: latest run).")
+    parser.add_argument("--run-id", default=None, help="Run ID to inspect (default: latest run).")
     parser.add_argument("--repo-root", default=".", help="Repository root path.")
     parser.add_argument("--show-hashes", action="store_true", help="Show LockHash values for lock-valid phases.")
     args = parser.parse_args()
@@ -1797,12 +1797,15 @@ def main() -> None:
         print("       Is this the project repo root? (Expected .recursive/run/)")
         sys.exit(1)
 
-    if args.run_id.strip():
-        run_dir = run_root / args.run_id.strip()
+    if args.run_id is not None:
+        if not phase_rules_registry.is_canonical_run_id(args.run_id):
+            print(f"[FAIL] {phase_rules_registry.CANONICAL_RUN_ID_ERROR}")
+            sys.exit(1)
+        run_dir = run_root / args.run_id
         if not run_dir.exists():
             print(f"[FAIL] Run directory not found: {run_dir}")
             sys.exit(1)
-        run_id = args.run_id.strip()
+        run_id = args.run_id
     else:
         latest = get_latest_run_directory(run_root)
         if latest is None:

@@ -2,7 +2,7 @@
 param(
     [string]$RepoRoot = (Get-Location).Path,
     [Parameter(Mandatory = $true, ParameterSetName = "Ledger")][string]$Ledger,
-    [Parameter(Mandatory = $true, ParameterSetName = "Run")][string]$RunId,
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")][AllowEmptyString()][string]$RunId,
     [Parameter(ParameterSetName = "Run")][string]$PhaseArtifact = "03.5-code-review.md"
 )
 

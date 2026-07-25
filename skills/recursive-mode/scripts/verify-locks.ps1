@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RunId = "",
+    [AllowEmptyString()][string]$RunId = "",
     [string]$RepoRoot = (Get-Location).Path,
     [switch]$Fix,
     [switch]$ShowHashes
@@ -17,7 +17,7 @@ if (-not $python) {
 
 $scriptPath = Join-Path $PSScriptRoot "verify-locks.py"
 $argsList = @($scriptPath, "--repo-root", $RepoRoot)
-if ($RunId) { $argsList += @("--run-id", $RunId) }
+if ($PSBoundParameters.ContainsKey("RunId")) { $argsList += @("--run-id", $RunId) }
 if ($Fix.IsPresent) { $argsList += "--fix" }
 if ($ShowHashes.IsPresent) { $argsList += "--show-hashes" }
 

@@ -1135,13 +1135,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a Recursive Review ledger or audited phase artifact.")
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--ledger", default="")
-    parser.add_argument("--run-id", default="")
+    parser.add_argument("--run-id", default=None)
     parser.add_argument("--phase-artifact", default="03.5-code-review.md")
     args = parser.parse_args()
     repo_root = Path(args.repo_root).resolve()
     if args.ledger:
         result = validate_ledger(repo_root, repo_path(repo_root, args.ledger))
-    elif args.run_id:
+    elif args.run_id is not None:
+        if not phase_rules.is_canonical_run_id(args.run_id):
+            print(f"[FAIL] {phase_rules.CANONICAL_RUN_ID_ERROR}")
+            return 1
         run_dir = repo_root / ".recursive/run" / args.run_id
         result = validate_phase_artifact(repo_root, run_dir, run_dir / args.phase_artifact)
     else:

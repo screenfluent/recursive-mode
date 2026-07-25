@@ -233,7 +233,11 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    run_dir = repo_root / ".recursive" / "run" / args.run_id.strip()
+    phase_rules = load_phase_rules_module()
+    if not phase_rules.is_canonical_run_id(args.run_id):
+        print(f"[FAIL] {phase_rules.CANONICAL_RUN_ID_ERROR}")
+        return 1
+    run_dir = repo_root / ".recursive" / "run" / args.run_id
     if not run_dir.exists():
         print(f"[FAIL] Run directory not found: {run_dir}")
         return 1
@@ -248,7 +252,6 @@ def main() -> int:
         print(f"[FAIL] Artifact not found: {artifact_path}")
         return 1
 
-    phase_rules = load_phase_rules_module()
     lint = load_lint_module()
     activated_phases, activation_issues = lint.get_active_scheduled_owner_phases(repo_root, run_dir)
 

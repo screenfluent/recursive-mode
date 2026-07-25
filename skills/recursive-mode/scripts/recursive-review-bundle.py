@@ -19,7 +19,6 @@ import recursive_review_surface as review_surface
 
 DIFF_BASIS_ALLOWED_TYPES = {"local commit", "local branch", "remote ref", "merge-base derived"}
 WORKING_TREE_COMPARISON_REFS = {"working-tree", "working-tree@head", "worktree", "working-tree+head"}
-RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def trim_md_value(value: str) -> str:
@@ -313,9 +312,9 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    run_id = args.run_id.strip()
-    if not RUN_ID_RE.fullmatch(run_id):
-        print("[FAIL] Run ID must be a canonical kebab-case directory name.")
+    run_id = args.run_id
+    if not phase_rules.is_canonical_run_id(run_id):
+        print(f"[FAIL] {phase_rules.CANONICAL_RUN_ID_ERROR}")
         return 1
     run_root = repo_root / ".recursive" / "run"
     run_dir = run_root / run_id

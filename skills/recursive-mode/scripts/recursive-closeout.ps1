@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$RunId,
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RunId,
     [Parameter(Mandatory = $true)][string]$Phase,
     [string]$RepoRoot = (Get-Location).Path,
     [string]$PreviewLog = "",

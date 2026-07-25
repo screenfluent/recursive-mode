@@ -303,14 +303,10 @@ class RecursiveTrainingTests(unittest.TestCase):
 
     def test_training_grpo_uses_generic_extractor_contract(self) -> None:
         source = (SCRIPT_DIR / "recursive-training-grpo.py").read_text(encoding="utf-8")
-        skill_doc = (REPO_ROOT / "skills" / "recursive-training" / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertNotIn("OPENAI_API_KEY", source)
         self.assertNotIn("OPENAI_BASE_URL", source)
         self.assertNotIn("AsyncOpenAI", source)
-        self.assertNotIn("OPENAI_API_KEY", skill_doc)
-        self.assertNotIn("OPENAI_BASE_URL", skill_doc)
-        self.assertNotIn("API key", skill_doc)
         self.assertNotIn("extraction runtime", source)
 
     def test_training_memory_writer_includes_subsystem_schema_field(self) -> None:

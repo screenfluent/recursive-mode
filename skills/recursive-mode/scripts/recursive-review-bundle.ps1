@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$RunId,
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RunId,
     [Parameter(Mandatory = $true)][string]$Phase,
     [Parameter(Mandatory = $true)][string]$Role,
     [Parameter(Mandatory = $true)][string]$ArtifactPath,

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RunId = "",
+    [AllowEmptyString()][string]$RunId = "",
     [string]$RepoRoot = (Get-Location).Path,
     [switch]$ShowHashes
 )
@@ -16,7 +16,7 @@ if (-not $python) {
 
 $scriptPath = Join-Path $PSScriptRoot "recursive-status.py"
 $argsList = @($scriptPath, "--repo-root", $RepoRoot)
-if ($RunId) { $argsList += @("--run-id", $RunId) }
+if ($PSBoundParameters.ContainsKey("RunId")) { $argsList += @("--run-id", $RunId) }
 if ($ShowHashes.IsPresent) { $argsList += "--show-hashes" }
 
 & $python @argsList

@@ -72,6 +72,13 @@ for _artifact, _phase_key in AUDITED_PHASE_REGISTRY:
 # Lock receipts live in this subdirectory of the run directory.
 LOCKS_SUBDIR = "locks"
 RECEIPT_SUFFIX = ".receipt.json"
+RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+CANONICAL_RUN_ID_ERROR = "Run ID must be a canonical kebab-case directory name."
+
+
+def is_canonical_run_id(run_id: str) -> bool:
+    """Return True only for the canonical run-directory identifier grammar."""
+    return RUN_ID_RE.fullmatch(run_id) is not None
 
 # ---------------------------------------------------------------------------
 # Lock-hash helpers (kept here so callers don't need to duplicate them)

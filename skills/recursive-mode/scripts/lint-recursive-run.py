@@ -2840,7 +2840,7 @@ def lint_memory_plane(repo_root: Path) -> tuple[int, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lint recursive-mode run artifacts.")
-    parser.add_argument("--run-id", default="", help="Run ID to lint (default: latest run).")
+    parser.add_argument("--run-id", default=None, help="Run ID to lint (default: latest run).")
     parser.add_argument("--repo-root", default=".", help="Repository root path.")
     parser.add_argument("--all-runs", action="store_true", help="Lint all runs under .recursive/run/.")
     parser.add_argument("--strict", action="store_true", help="Treat WARN as FAIL.")
@@ -2853,13 +2853,17 @@ def main() -> None:
         print("       Is this the project repo root? (Expected .recursive/run/)")
         sys.exit(1)
 
+    if args.run_id is not None and not phase_rules_registry.is_canonical_run_id(args.run_id):
+        print(f"[FAIL] {phase_rules_registry.CANONICAL_RUN_ID_ERROR}")
+        sys.exit(1)
+
     if args.all_runs:
         run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
         if not run_dirs:
             print(f"[FAIL] No runs found under: {run_root}")
             sys.exit(1)
-    elif args.run_id.strip():
-        run_dir = run_root / args.run_id.strip()
+    elif args.run_id is not None:
+        run_dir = run_root / args.run_id
         if not run_dir.exists():
             print(f"[FAIL] Run directory not found: {run_dir}")
             sys.exit(1)

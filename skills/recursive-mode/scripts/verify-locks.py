@@ -138,24 +138,28 @@ def collect_recursive_review_issues(repo_root: Path, run_dir: Path, artifact_nam
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify recursive-mode artifact lock integrity.")
-    parser.add_argument("--run-id", default="", help="Run ID to verify. If omitted, scans all runs.")
+    parser.add_argument("--run-id", default=None, help="Run ID to verify. If omitted, scans all runs.")
     parser.add_argument("--repo-root", default=".", help="Repository root path.")
     parser.add_argument("--fix", action="store_true", help="Fix incorrect lock hashes (updates LockedAt + LockHash).")
     parser.add_argument("--show-hashes", action="store_true", help="Show valid lock hashes in output.")
     args = parser.parse_args()
 
     resolved_repo_root = Path(args.repo_root).resolve()
+    phase_rules = load_phase_rules_module()
+    if args.run_id is not None and not phase_rules.is_canonical_run_id(args.run_id):
+        write_status("FAIL", phase_rules.CANONICAL_RUN_ID_ERROR)
+        return 1
     print("\nRecursive Lock Verification")
     print("=====================\n")
     print(f"Repository: {resolved_repo_root}")
-    print(f"Run ID: {args.run_id if args.run_id else '(scanning all runs)'}\n")
+    print(f"Run ID: {args.run_id if args.run_id is not None else '(scanning all runs)'}\n")
 
     run_base_dir = resolved_repo_root / ".recursive" / "run"
     if not run_base_dir.exists():
         write_status("FAIL", f"recursive run directory not found: {run_base_dir}")
         return 1
 
-    if args.run_id:
+    if args.run_id is not None:
         runs = [args.run_id]
     else:
         runs = sorted([d.name for d in run_base_dir.iterdir() if d.is_dir()])
@@ -180,8 +184,6 @@ def main() -> int:
     fixed_runs = 0
     failed_runs = 0
     stale_chain_runs = 0
-
-    phase_rules = load_phase_rules_module()
 
     for run in runs:
         total_runs += 1
