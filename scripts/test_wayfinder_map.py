@@ -163,7 +163,7 @@ class WayfinderMapHelperTest(unittest.TestCase):
             - Admin UI.
 
             ## Spec handoff
-            Human approval: Szymon approved 2026-07-12
+            Human approval: Fixture owner approved 2026-07-12
             Suggested run id: auth-token-source
             Promoted to: none
             """,

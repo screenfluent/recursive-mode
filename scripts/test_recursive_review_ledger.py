@@ -147,9 +147,9 @@ GeneratedAt: `2026-07-12T00:00:00Z`
         if disposition in {"rejected", "deferred", "out-of-scope"}:
             lines.append("- Disposition rationale: controller-approved rationale")
         if disposition == "deferred":
-            lines.extend(["- Owner: human-owner", "- Human approval: Szymon", "- Destination: `tracked-plan.md`"])
+            lines.extend(["- Owner: human-owner", "- Human approval: approved by fixture owner", "- Destination: `tracked-plan.md`"])
         if disposition == "out-of-scope":
-            lines.extend(["- Human decision: Szymon", "- Destination: `tracked-plan.md`"])
+            lines.extend(["- Human decision: approved by fixture owner", "- Destination: `tracked-plan.md`"])
         if disposition == "open":
             lines.extend(["- Claimed outcome: none", "- Claimed changes: none", "- Claimed verification: none", "- Controller verification: none"])
         elif disposition == "fixed":
