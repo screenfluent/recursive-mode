@@ -60,6 +60,27 @@ AUDITED_PHASE_REGISTRY: tuple[tuple[str, str], ...] = (
     ("07-state-update.md", "phase-7"),
     ("08-memory-impact.md", "phase-8"),
 )
+
+# Scheduling is a separate protocol from audited review ownership.  Every
+# canonical phase can own a later-phase handoff, including non-ledger Phase 5.
+SCHEDULING_PHASE_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("00-requirements.md", "phase-0-requirements"),
+    ("00-worktree.md", "phase-0-worktree"),
+    ("01-as-is.md", "phase-1"),
+    ("01.5-root-cause.md", "phase-1-5"),
+    ("02-to-be-plan.md", "phase-2"),
+    ("03-implementation-summary.md", "phase-3"),
+    ("03.5-code-review.md", "phase-3-5"),
+    ("04-test-summary.md", "phase-4"),
+    ("05-manual-qa.md", "phase-5"),
+    ("06-decisions-update.md", "phase-6"),
+    ("07-state-update.md", "phase-7"),
+    ("08-memory-impact.md", "phase-8"),
+)
+_SCHEDULING_ARTIFACT_TO_KEY: dict[str, str] = dict(SCHEDULING_PHASE_REGISTRY)
+_SCHEDULING_KEY_TO_ARTIFACT: dict[str, str] = {
+    phase_key: artifact for artifact, phase_key in SCHEDULING_PHASE_REGISTRY
+}
 AUDITED_ARTIFACTS: frozenset[str] = frozenset(artifact for artifact, _phase_key in AUDITED_PHASE_REGISTRY)
 _AUDITED_ARTIFACT_TO_KEY: dict[str, str] = dict(AUDITED_PHASE_REGISTRY)
 _AUDITED_KEY_TO_ARTIFACT: dict[str, str] = {phase_key: artifact for artifact, phase_key in AUDITED_PHASE_REGISTRY}
@@ -150,6 +171,16 @@ def later_audited_artifacts(artifact_file: str) -> list[str]:
     if source_index < 0:
         return []
     return [artifact for artifact in PHASE_SEQUENCE[source_index + 1:] if artifact in AUDITED_ARTIFACTS]
+
+
+def scheduling_phase_key(artifact_file: str) -> str | None:
+    """Map any schedulable canonical artifact to its handoff inventory key."""
+    return _SCHEDULING_ARTIFACT_TO_KEY.get(artifact_file)
+
+
+def scheduled_artifact_for_key(phase_key: str) -> str | None:
+    """Map a scheduling inventory key back to its canonical owner artifact."""
+    return _SCHEDULING_KEY_TO_ARTIFACT.get(phase_key)
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,9 @@ with bounded subprocess timeouts so smoke tests fail fast instead of hanging.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -140,13 +142,14 @@ class SmokeHarness:
         self.command_timeout = command_timeout
         self.script_dir = Path(__file__).resolve().parent
         self.repo_source_root = self.script_dir.parent
-        self.runtime_dir = self.repo_source_root / "skills" / "recursive-mode" / "scripts"
+        self.source_runtime_dir = self.repo_source_root / "skills" / "recursive-mode" / "scripts"
         self.python_exe = Path(sys.executable).resolve()
         self.preflight_notes: list[str] = []
         self.powershell_exe = self._resolve_powershell()
         self.temp_root = Path(temp_root).resolve() if temp_root else None
         self.temp_dir = self._make_temp_dir()
         self.repo_root = self.temp_dir / "repo"
+        self.runtime_dir = self.repo_root / ".recursive" / "scripts"
         self.run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d-tiny-tasks-smoke-%H%M%S")
         self.feature_branch = f"recursive/{self.run_id}"
         self.base_branch = "main"
@@ -220,6 +223,7 @@ class SmokeHarness:
             env["PYTHONDONTWRITEBYTECODE"] = "1"
             if self.powershell_exe is not None and Path(command[0]).resolve() == self.powershell_exe.resolve():
                 env["PYTHON"] = str(self.python_exe)
+                env["XDG_CACHE_HOME"] = str(self.temp_dir / "powershell-cache")
             completed = subprocess.run(
                 command,
                 cwd=str(cwd or self.repo_root),
@@ -281,12 +285,70 @@ class SmokeHarness:
             *args,
         ]
 
+    def powershell_splat_command(self, script_name: str, parameters: dict[str, object]) -> list[str]:
+        """Invoke a wrapper with real PowerShell arrays instead of ambiguous CSV."""
+        if self.powershell_exe is None:
+            raise SmokeError("PowerShell command requested but no PowerShell executable is available.")
+        payload = base64.b64encode(
+            json.dumps(
+                {
+                    "script": str(self.runtime_dir / script_name),
+                    "parameters": parameters,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).decode("ascii")
+        program = "\n".join(
+            [
+                f"$payloadBytes = [Convert]::FromBase64String('{payload}')",
+                "$payloadJson = [Text.Encoding]::UTF8.GetString($payloadBytes)",
+                "$payloadObject = $payloadJson | ConvertFrom-Json",
+                "$splat = @{}",
+                "foreach ($property in $payloadObject.parameters.PSObject.Properties) {",
+                "    if ($property.Value -is [System.Array]) {",
+                "        $splat[$property.Name] = [string[]]@($property.Value)",
+                "    } else {",
+                "        $splat[$property.Name] = $property.Value",
+                "    }",
+                "}",
+                "& $payloadObject.script @splat",
+                "exit $LASTEXITCODE",
+            ]
+        )
+        encoded_program = base64.b64encode(program.encode("utf-16-le")).decode("ascii")
+        return [
+            str(self.powershell_exe),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded_program,
+        ]
+
     def script_command(self, toolchain: str, script_stem: str, *args: str) -> list[str]:
         if toolchain == "python":
             return self.python_command(f"{script_stem}.py", *args)
         if toolchain == "powershell":
             return self.powershell_command(f"{script_stem}.ps1", *args)
         raise SmokeError(f"Unsupported toolchain: {toolchain}")
+
+    def bootstrap_command(self, toolchain: str, *args: str) -> list[str]:
+        if toolchain == "python":
+            return [str(self.python_exe), str(self.source_runtime_dir / "install-recursive-mode.py"), *args]
+        if toolchain == "powershell":
+            if self.powershell_exe is None:
+                raise SmokeError("PowerShell command requested but no PowerShell executable is available.")
+            return [
+                str(self.powershell_exe),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(self.source_runtime_dir / "install-recursive-mode.ps1"),
+                *args,
+            ]
+        raise SmokeError(f"Unsupported bootstrap toolchain: {toolchain}")
 
     def primary_toolchain(self) -> str:
         return "python" if self.selected_toolchain in {"python", "mixed"} else "powershell"
@@ -336,12 +398,12 @@ class SmokeHarness:
         self.log(f"Bootstrapping recursive-mode with {primary}.")
         if primary == "python":
             self.run_command(
-                self.script_command("python", "install-recursive-mode", "--repo-root", str(self.repo_root)),
+                self.bootstrap_command("python", "--repo-root", str(self.repo_root)),
                 cwd=self.repo_root,
             )
         else:
             self.run_command(
-                self.script_command("powershell", "install-recursive-mode", "-RepoRoot", str(self.repo_root)),
+                self.bootstrap_command("powershell", "-RepoRoot", str(self.repo_root)),
                 cwd=self.repo_root,
             )
 
@@ -643,32 +705,25 @@ class SmokeHarness:
             for question in questions:
                 command.extend(["--audit-question", question])
         else:
-            command = self.script_command(
-                "powershell",
-                "recursive-review-bundle",
-                "-RepoRoot",
-                str(self.repo_root),
-                "-RunId",
-                self.run_id,
-                "-Phase",
-                artifact_name,
-                "-Role",
-                "code-reviewer",
-                "-ArtifactPath",
-                artifact_path,
-                "-ReviewId",
-                review_id,
-                "-ReviewPass",
-                pass_id,
+            command = self.powershell_splat_command(
+                "recursive-review-bundle.ps1",
+                {
+                    "RepoRoot": str(self.repo_root),
+                    "RunId": self.run_id,
+                    "Phase": artifact_name,
+                    "Role": "code-reviewer",
+                    "ArtifactPath": artifact_path,
+                    "ReviewId": review_id,
+                    "ReviewPass": pass_id,
+                    "UpstreamArtifact": upstream,
+                    "Addendum": addenda,
+                    "NoAutoAddenda": True,
+                    "ControlDoc": [".recursive/RECURSIVE.md"],
+                    "CodeRef": code_refs,
+                    "EvidenceRef": evidence,
+                    "AuditQuestion": questions,
+                },
             )
-            command.extend(["-UpstreamArtifact", ",".join(upstream)])
-            if addenda:
-                command.extend(["-Addendum", ",".join(addenda)])
-            command.append("-NoAutoAddenda")
-            command.extend(["-ControlDoc", ".recursive/RECURSIVE.md"])
-            command.extend(["-CodeRef", ",".join(code_refs)])
-            command.extend(["-EvidenceRef", ",".join(evidence)])
-            command.extend(["-AuditQuestion", ",".join(questions)])
 
         self.run_command(command, cwd=self.repo_root)
         return self.repo_rel(self.run_dir / "evidence" / "review-bundles" / phase_key / review_id / f"{pass_id}.md")
@@ -702,15 +757,21 @@ class SmokeHarness:
             raise SmokeError(f"Review bundle path mismatch: expected {expected_bundle_path}, generated {bundle_path}")
         bundle_file = self.repo_root / bundle_path.lstrip("/")
         bundle_hash = hashlib.sha256(bundle_file.read_bytes()).hexdigest()
-        artifact_index = ARTIFACT_SEQUENCE.index(artifact_name)
-        scope_evidence = [bundle_path]
-        scope_evidence.extend(f"/.recursive/run/{self.run_id}/{name}" for name in ARTIFACT_SEQUENCE[:artifact_index] if (self.run_dir / name).is_file())
-        if artifact_index > ARTIFACT_SEQUENCE.index("02-to-be-plan.md") and self.plan_addendum_path:
-            scope_evidence.append(self.plan_addendum_path)
-        if artifact_index > ARTIFACT_SEQUENCE.index("04-test-summary.md") and self.test_upstream_gap_addendum_path:
-            scope_evidence.append(self.test_upstream_gap_addendum_path)
-        scope_evidence.extend(["/.recursive/memory/skills/SKILLS.md", "/tiny_tasks.py", "/test_tiny_tasks.py", self.red_log, self.green_log, *(extra_evidence or [])])
-        scope_evidence_lines = "\n".join(f"  - `{path}`" for path in dict.fromkeys(scope_evidence))
+        bundle_content = bundle_file.read_text(encoding="utf-8")
+        snapshot_match = re.search(
+            r"(?ms)^## Reviewed Surface Snapshot\s*$\n```json\s*\n(.*?)\n```",
+            bundle_content,
+        )
+        if snapshot_match is None:
+            raise SmokeError(f"Review bundle omitted its canonical surface snapshot: {bundle_path}")
+        surface_snapshot = json.loads(snapshot_match.group(1))
+        changed_files = [record["path"] for record in surface_snapshot.get("changed", [])] or ["none"]
+        changed_file_lines = "\n".join(f"  - `{path}`" for path in changed_files)
+        scope_evidence = [
+            bundle_path,
+            *(record["path"] for record in surface_snapshot.get("references", [])),
+        ]
+        scope_evidence_lines = "\n".join(f"  - `{path}`" for path in scope_evidence)
         ledger = self.repo_root / ledger_rel.lstrip("/")
         snapshot = self.repo_root / pass_rel.lstrip("/")
         previous_pass = "none"
@@ -730,8 +791,7 @@ class SmokeHarness:
 - Artifact Hash: {bundle_hash}
 - Diff Basis: `{bundle_path}`
 - Changed Files:
-  - `/tiny_tasks.py`
-  - `/test_tiny_tasks.py`
+{changed_file_lines}
 - Evidence Basis:
 {scope_evidence_lines}
 
@@ -2020,48 +2080,76 @@ class SmokeHarness:
             f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
         ]
         reviewed_files = ["tiny_tasks.py", "test_tiny_tasks.py"]
-        action_command = self.script_command(
-            primary,
-            "recursive-subagent-action",
-            "--repo-root" if primary == "python" else "-RepoRoot",
-            str(self.repo_root),
-            "--run-id" if primary == "python" else "-RunId",
-            self.run_id,
-            "--subagent-id" if primary == "python" else "-SubagentId",
-            "reviewer-01",
-            "--phase" if primary == "python" else "-Phase",
-            "03.5 Code Review",
-            "--purpose" if primary == "python" else "-Purpose",
-            "Delegated review smoke scenario",
-            "--execution-mode" if primary == "python" else "-ExecutionMode",
-            "review",
-            "--artifact-path" if primary == "python" else "-ArtifactPath",
-            f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
-            "--review-bundle" if primary == "python" else "-ReviewBundle",
-            self.bundle_path,
-            "--review-ledger" if primary == "python" else "-ReviewLedger",
-            review_ledger,
-            "--action-taken" if primary == "python" else "-ActionTaken",
-            "Reviewed the immutable bundle, upstream artifacts, and changed product files.",
-            "--artifact-read" if primary == "python" else "-ArtifactRead",
-            f"/.recursive/run/{self.run_id}/03.5-code-review.md",
-            "--audit-question" if primary == "python" else "-AuditQuestion",
-            "Does the implementation satisfy R1 without widening scope?",
-            "--verification-path" if primary == "python" else "-VerificationPath",
-            "tiny_tasks.py",
-            "--verification-item" if primary == "python" else "-VerificationItem",
-            "Controller verified the action against the immutable bundle, ledger, and product diff.",
-            "--output-name" if primary == "python" else "-OutputName",
-            record_name,
-        )
         if primary == "python":
+            action_command = self.script_command(
+                "python",
+                "recursive-subagent-action",
+                "--repo-root",
+                str(self.repo_root),
+                "--run-id",
+                self.run_id,
+                "--subagent-id",
+                "reviewer-01",
+                "--phase",
+                "03.5 Code Review",
+                "--purpose",
+                "Delegated review smoke scenario",
+                "--execution-mode",
+                "review",
+                "--artifact-path",
+                f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
+                "--review-bundle",
+                self.bundle_path,
+                "--review-ledger",
+                review_ledger,
+                "--action-taken",
+                "Reviewed the immutable bundle, upstream artifacts, and changed product files.",
+                "--artifact-read",
+                f"/.recursive/run/{self.run_id}/03.5-code-review.md",
+                "--audit-question",
+                "Does the implementation satisfy R1 without widening scope?",
+                "--verification-path",
+                "tiny_tasks.py",
+                "--verification-item",
+                "Controller verified the action against the immutable bundle, ledger, and product diff.",
+                "--output-name",
+                record_name,
+            )
             for upstream_artifact in upstream_artifacts:
                 action_command.extend(["--upstream-artifact", upstream_artifact])
             for reviewed_file in reviewed_files:
                 action_command.extend(["--reviewed-file", reviewed_file])
         else:
-            action_command.extend(["-UpstreamArtifact", ",".join(upstream_artifacts)])
-            action_command.extend(["-ReviewedFile", ",".join(reviewed_files)])
+            action_command = self.powershell_splat_command(
+                "recursive-subagent-action.ps1",
+                {
+                    "RepoRoot": str(self.repo_root),
+                    "RunId": self.run_id,
+                    "SubagentId": "reviewer-01",
+                    "Phase": "03.5 Code Review",
+                    "Purpose": "Delegated review smoke scenario",
+                    "ExecutionMode": "review",
+                    "ArtifactPath": f"/.recursive/run/{self.run_id}/03-implementation-summary.md",
+                    "ReviewBundle": self.bundle_path,
+                    "ReviewLedger": review_ledger,
+                    "ActionTaken": [
+                        "Reviewed the immutable bundle, upstream artifacts, and changed product files."
+                    ],
+                    "ArtifactRead": [
+                        f"/.recursive/run/{self.run_id}/03.5-code-review.md"
+                    ],
+                    "AuditQuestion": [
+                        "Does the implementation satisfy R1 without widening scope?"
+                    ],
+                    "VerificationPath": ["tiny_tasks.py"],
+                    "VerificationItem": [
+                        "Controller verified the action against the immutable bundle, ledger, and product diff."
+                    ],
+                    "OutputName": record_name,
+                    "UpstreamArtifact": upstream_artifacts,
+                    "ReviewedFile": reviewed_files,
+                },
+            )
         self.run_command(action_command, cwd=self.repo_root)
         self.subagent_action_record_path = action_record_path
         self.lock_artifact(primary, "03.5-code-review.md")

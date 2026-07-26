@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -19,6 +22,22 @@ import recursive_review_surface as review_surface
 
 DIFF_BASIS_ALLOWED_TYPES = {"local commit", "local branch", "remote ref", "merge-base derived"}
 WORKING_TREE_COMPARISON_REFS = {"working-tree", "working-tree@head", "worktree", "working-tree+head"}
+BUNDLE_SECTION_ORDER = [
+    "Bundle Scope",
+    "Routing",
+    "Diff Basis",
+    "Changed Files Reviewed",
+    "Reviewed Surface Snapshot",
+    "Upstream Artifacts To Re-read",
+    "Relevant Addenda",
+    "Prior Recursive Evidence",
+    "Control-Plane Docs",
+    "Targeted Code References",
+    "Evidence References",
+    "Audit Questions",
+    "Required Output",
+    "Notes",
+]
 
 
 def trim_md_value(value: str) -> str:
@@ -87,22 +106,7 @@ def parse_diff_basis_source(content: str) -> str:
     return content
 
 
-def get_run_diff_basis(run_dir: Path) -> dict[str, str | None]:
-    worktree_path = run_dir / "00-worktree.md"
-    if not worktree_path.exists():
-        return {
-            "baseline_type": None,
-            "baseline_reference": None,
-            "comparison_reference": None,
-            "normalized_baseline": None,
-            "normalized_comparison": None,
-            "normalized_diff_command": None,
-            "base_branch": None,
-            "worktree_branch": None,
-            "notes": None,
-        }
-
-    content = worktree_path.read_text(encoding="utf-8")
+def get_run_diff_basis(content: str) -> dict[str, str | None]:
     source = parse_diff_basis_source(content)
     return {
         "baseline_type": get_md_field_value(source, "Baseline type"),
@@ -128,7 +132,7 @@ def get_run_diff_basis(run_dir: Path) -> dict[str, str | None]:
     }
 
 
-def normalize_diff_basis(repo_root: Path, diff_basis: dict[str, str | None]) -> tuple[dict[str, str] | None, str | None]:
+def normalize_diff_basis(repo_root: Path, diff_basis: dict[str, str | None]) -> tuple[dict[str, object] | None, str | None]:
     baseline_type = normalize_baseline_type(diff_basis.get("baseline_type"))
     baseline_reference = trim_md_value(diff_basis.get("baseline_reference") or "")
     comparison_reference = normalize_comparison_reference(diff_basis.get("comparison_reference"))
@@ -170,13 +174,15 @@ def normalize_diff_basis(repo_root: Path, diff_basis: dict[str, str | None]) -> 
 
     if normalized_comparison == "working-tree":
         expected_command = f"git diff --name-only {computed_baseline}"
-        git_args = ["diff", "--name-only", computed_baseline]
+        tracked_diff_argv = ["diff", "--name-only", "-z", computed_baseline, "--"]
+        untracked_files_argv = ["ls-files", "--others", "--exclude-standard", "-z"]
     else:
         computed_comparison, error = run_git(repo_root, "rev-parse", "--verify", f"{normalized_comparison}^{{commit}}")
         if error:
             return None, f"Unable to resolve comparison reference '{normalized_comparison}': {error}"
         expected_command = f"git diff --name-only {computed_baseline}..{computed_comparison}"
-        git_args = ["diff", "--name-only", f"{computed_baseline}..{computed_comparison}"]
+        tracked_diff_argv = ["diff", "--name-only", "-z", f"{computed_baseline}..{computed_comparison}", "--"]
+        untracked_files_argv = None
         if normalized_comparison != computed_comparison:
             return None, (
                 "Recorded Normalized comparison does not match the executable diff basis "
@@ -197,12 +203,104 @@ def normalize_diff_basis(repo_root: Path, diff_basis: dict[str, str | None]) -> 
         "normalized_comparison": normalized_comparison,
         "normalized_diff_command": expected_command,
         "comparison_git_ref": comparison_git_ref,
-        "git_args": git_args,
+        "tracked_diff_argv": tracked_diff_argv,
+        "untracked_files_argv": untracked_files_argv,
     }, None
 
 
 def normalize_repo_path(raw_path: str) -> str:
-    return raw_path.replace("\\", "/").strip().lstrip("/")
+    return review_surface.normalize_path(raw_path)
+
+
+def has_reparse_point(path: Path) -> bool:
+    """Return whether an existing path component is a symlink or reparse point."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def validate_safe_repo_path(
+    repo_root: Path,
+    raw_path: str,
+    *,
+    label: str,
+    require_regular_file: bool,
+    allow_missing_leaf: bool = False,
+) -> tuple[Path | None, str | None]:
+    """Validate a lexical repo path without following any nested indirection."""
+    try:
+        normalized = normalize_repo_path(raw_path)
+    except ValueError:
+        return None, f"{label} must be a canonical repository-relative path without drive, absolute, empty, dot, or dot-dot components: {raw_path}"
+    parts = Path(normalized).parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return None, f"{label} contains a repository path escape: {raw_path}"
+    candidate = repo_root.joinpath(*parts)
+    cursor = repo_root
+    for index, part in enumerate(parts):
+        cursor = cursor / part
+        is_leaf = index == len(parts) - 1
+        try:
+            os.lstat(cursor)
+        except FileNotFoundError:
+            if allow_missing_leaf and is_leaf:
+                break
+            if allow_missing_leaf and not is_leaf:
+                continue
+            return None, f"{label} does not exist: /{normalized}"
+        except OSError as exc:
+            return None, f"Unable to inspect {label} /{normalized}: {exc}"
+        if has_reparse_point(cursor):
+            return None, f"{label} contains a symlink or reparse point: /{normalized}"
+    try:
+        candidate.resolve(strict=not allow_missing_leaf).relative_to(repo_root.resolve(strict=True))
+    except (FileNotFoundError, OSError, ValueError):
+        return None, f"{label} must remain inside the repository: /{normalized}"
+    if require_regular_file:
+        try:
+            leaf_metadata = os.lstat(candidate)
+        except OSError as exc:
+            return None, f"Unable to inspect {label} /{normalized}: {exc}"
+        if (
+            not stat.S_ISREG(leaf_metadata.st_mode)
+            or has_reparse_point(candidate)
+            or leaf_metadata.st_nlink != 1
+        ):
+            return None, f"{label} must resolve directly to a regular non-symlink, non-hardlink file: /{normalized}"
+    return candidate, None
+
+
+def read_regular_bytes(repo_root: Path, path: Path, *, label: str) -> tuple[bytes | None, str | None]:
+    try:
+        relative = str(path.relative_to(repo_root))
+    except ValueError:
+        return None, f"{label} must remain inside the repository"
+    regular_path, path_error = validate_safe_repo_path(
+        repo_root,
+        relative,
+        label=label,
+        require_regular_file=True,
+    )
+    if path_error or regular_path is None:
+        return None, path_error or f"{label} must be a canonical regular non-symlink file"
+    try:
+        return regular_path.read_bytes(), None
+    except OSError as exc:
+        return None, f"{label} must be readable: {exc}"
+
+
+def read_regular_utf8(repo_root: Path, path: Path, *, label: str) -> tuple[str | None, str | None]:
+    payload, read_error = read_regular_bytes(repo_root, path, label=label)
+    if payload is None:
+        return None, read_error
+    try:
+        return payload.decode("utf-8"), None
+    except UnicodeDecodeError as exc:
+        return None, f"{label} must be readable UTF-8: {exc}"
 
 
 def get_stage_local_addenda_paths(run_dir: Path, artifact_name: str) -> list[Path]:
@@ -280,12 +378,118 @@ def slugify(value: str) -> str:
 
 
 def render_list(title: str, values: list[str], *, indent: str = "- ") -> list[str]:
-    lines = [title]
-    if not values:
-        lines.append(f"{indent}none")
-        return lines
-    lines.extend(f"{indent}`{value}`" for value in values)
-    return lines
+    if indent != "- ":
+        raise ValueError("canonical review-bundle lists use '- ' indentation")
+    return [title, *review_surface.render_markdown_list(values)]
+
+
+def bundle_section_body(content: str, heading: str) -> str:
+    match = re.search(
+        rf"(?ms)^## {re.escape(heading)}\n(.*?)(?=^## |\Z)",
+        content,
+    )
+    return match.group(1).strip("\n") if match else ""
+
+
+def validate_rendered_bundle(
+    content: str,
+    *,
+    expected_snapshot: dict[str, object],
+    expected_lists: dict[str, list[str]],
+) -> list[str]:
+    """Validate the complete rendered artifact before its exclusive write."""
+    issues: list[str] = []
+    if "\r" in content or not content.endswith("\n"):
+        issues.append("rendered bundle must use canonical LF endings and end with LF")
+    headings = re.findall(r"(?m)^## (.+?)$", content)
+    if headings != BUNDLE_SECTION_ORDER:
+        issues.append("rendered bundle top-level sections do not match the exact canonical order")
+
+    header, separator, _remainder = content.partition("\n\n")
+    if not separator:
+        issues.append("rendered bundle is missing the header/section boundary")
+    header_matches = [
+        re.fullmatch(r"([A-Za-z][A-Za-z0-9 ]*):\s*(.+)", line)
+        for line in header.splitlines()
+    ]
+    if any(match is None for match in header_matches):
+        issues.append("rendered bundle header contains malformed metadata")
+    else:
+        header_names = [match.group(1) for match in header_matches if match is not None]
+        if header_names != review_ledger.BUNDLE_HEADER_FIELDS:
+            issues.append("rendered bundle header fields do not match the exact canonical order")
+
+    snapshot, snapshot_issues = review_surface.parse(content)
+    issues.extend(snapshot_issues)
+    if snapshot is not None and snapshot != expected_snapshot:
+        issues.append("rendered Reviewed Surface Snapshot differs from the captured source snapshot")
+
+    for heading, expected_values in expected_lists.items():
+        body = bundle_section_body(content, heading)
+        try:
+            actual_values = review_surface.parse_markdown_list(body)
+        except ValueError as exc:
+            issues.append(f"rendered ## {heading} is not a canonical JSON-atom list: {exc}")
+            continue
+        if actual_values != expected_values:
+            issues.append(f"rendered ## {heading} differs from its source values")
+
+    if snapshot is not None:
+        snapshot_changed = [str(record["path"]) for record in snapshot.get("changed", [])]
+        if expected_lists.get("Changed Files Reviewed") != snapshot_changed:
+            issues.append("rendered Changed Files Reviewed is not bound to the source snapshot")
+    return sorted(set(issues))
+
+
+def ensure_safe_directory_chain(repo_root: Path, directory: Path, *, label: str) -> str | None:
+    try:
+        relative = directory.relative_to(repo_root)
+    except ValueError:
+        return f"{label} must remain inside the repository"
+    cursor = repo_root
+    for part in relative.parts:
+        cursor = cursor / part
+        try:
+            cursor.mkdir()
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            return f"Unable to create {label}: {exc}"
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            return f"Unable to inspect {label}: {exc}"
+        if not stat.S_ISDIR(metadata.st_mode) or has_reparse_point(cursor):
+            return f"{label} contains a symlink, reparse point, or non-directory component"
+    return None
+
+
+def write_exclusive_bundle(path: Path, payload: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o644)
+    opened: os.stat_result | None = None
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise OSError("exclusive bundle target is not a unique regular file")
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short write while persisting review bundle")
+            view = view[written:]
+        os.fsync(descriptor)
+    except BaseException:
+        try:
+            current = path.lstat()
+            if opened is not None and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+                path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
 
 
 def main() -> int:
@@ -318,36 +522,96 @@ def main() -> int:
         return 1
     run_root = repo_root / ".recursive" / "run"
     run_dir = run_root / run_id
-    if run_dir.is_symlink() or run_dir.resolve().parent != run_root.resolve():
-        print("[FAIL] Resolved run directory must remain directly beneath the repository run root.")
+    checked_run_dir, path_error = validate_safe_repo_path(
+        repo_root,
+        f".recursive/run/{run_id}",
+        label="Run directory",
+        require_regular_file=False,
+    )
+    if path_error or checked_run_dir is None or not checked_run_dir.is_dir():
+        print(f"[FAIL] {path_error or 'Run directory must be a real directory'}")
         return 1
-    if not run_dir.exists():
-        print(f"[FAIL] Run directory not found: {run_dir}")
+    run_dir = checked_run_dir
+    worktree_path, path_error = validate_safe_repo_path(
+        repo_root,
+        f".recursive/run/{run_id}/00-worktree.md",
+        label="Diff basis artifact",
+        require_regular_file=True,
+    )
+    if path_error:
+        print(f"[FAIL] {path_error}")
         return 1
-
-    diff_basis = get_run_diff_basis(run_dir)
+    if worktree_path is None:
+        print("[FAIL] Diff basis artifact must be a canonical regular non-symlink file")
+        return 1
+    worktree_content, read_error = read_regular_utf8(repo_root, worktree_path, label="Diff basis artifact")
+    if worktree_content is None:
+        print(f"[FAIL] {read_error}")
+        return 1
+    diff_basis = get_run_diff_basis(worktree_content)
     normalized_diff_basis, diff_basis_error = normalize_diff_basis(repo_root, diff_basis)
     if diff_basis_error:
         print(f"[FAIL] {diff_basis_error}")
         return 1
-    artifact_path = normalize_repo_path(args.artifact_path)
-    upstream_artifacts = [normalize_repo_path(item) for item in args.upstream_artifact]
-    addenda = [normalize_repo_path(item) for item in args.addendum]
-    if not (repo_root / artifact_path).exists():
-        print(f"[FAIL] Artifact path not found: /{artifact_path}")
+    try:
+        artifact_path = normalize_repo_path(args.artifact_path)
+        upstream_artifacts = [normalize_repo_path(item) for item in args.upstream_artifact]
+        addenda = [normalize_repo_path(item) for item in args.addendum]
+    except ValueError as exc:
+        print(f"[FAIL] {exc}")
         return 1
-    if not args.no_auto_addenda:
-        addenda.extend(auto_discover_addenda(run_dir, run_dir.name, artifact_path, upstream_artifacts))
-    addenda = sorted(set(addenda))
-    prior_refs = sorted(set(normalize_repo_path(item) for item in args.prior_ref if item.strip()))
-    prior_refs.extend(auto_discover_skill_memory_refs(repo_root, args.phase, args.role))
-    prior_refs = sorted(set(prior_refs))
-    control_docs = [normalize_repo_path(item) for item in args.control_doc]
-    code_refs = [normalize_repo_path(item) for item in args.code_ref]
-    evidence_refs = [normalize_repo_path(item) for item in args.evidence_ref]
-    routing_config_path = normalize_repo_path(args.routing_config_path) if args.routing_config_path.strip() else ""
-    routing_discovery_path = normalize_repo_path(args.routing_discovery_path) if args.routing_discovery_path.strip() else ""
-    audit_questions = [item.strip() for item in args.audit_question if item.strip()]
+    artifact_fs_path, path_error = validate_safe_repo_path(
+        repo_root,
+        args.artifact_path,
+        label="Artifact path",
+        require_regular_file=True,
+    )
+    if path_error:
+        print(f"[FAIL] {path_error}")
+        return 1
+    try:
+        if not args.no_auto_addenda:
+            addenda.extend(auto_discover_addenda(run_dir, run_dir.name, artifact_path, upstream_artifacts))
+        addenda = sorted(set(addenda))
+        prior_refs = sorted(set(normalize_repo_path(item) for item in args.prior_ref if item.strip()))
+        prior_refs.extend(auto_discover_skill_memory_refs(repo_root, args.phase, args.role))
+        prior_refs = sorted(set(prior_refs))
+        control_docs = [normalize_repo_path(item) for item in args.control_doc]
+        code_refs = [normalize_repo_path(item) for item in args.code_ref]
+        evidence_refs = [normalize_repo_path(item) for item in args.evidence_ref]
+        routing_config_path = normalize_repo_path(args.routing_config_path) if args.routing_config_path.strip() else ""
+        routing_discovery_path = normalize_repo_path(args.routing_discovery_path) if args.routing_discovery_path.strip() else ""
+    except ValueError as exc:
+        print(f"[FAIL] {exc}")
+        return 1
+    audit_questions = [item for item in args.audit_question if item.strip()]
+    referenced_paths = [
+        ("Upstream artifact", item) for item in upstream_artifacts
+    ] + [
+        ("Addendum", item) for item in addenda
+    ] + [
+        ("Prior reference", item) for item in prior_refs
+    ] + [
+        ("Control document", item) for item in control_docs
+    ] + [
+        ("Code reference", item) for item in code_refs
+    ] + [
+        ("Evidence reference", item) for item in evidence_refs
+    ]
+    if routing_config_path:
+        referenced_paths.append(("Routing config", routing_config_path))
+    if routing_discovery_path:
+        referenced_paths.append(("Routing discovery", routing_discovery_path))
+    for label, reference in referenced_paths:
+        _checked_reference, path_error = validate_safe_repo_path(
+            repo_root,
+            reference,
+            label=label,
+            require_regular_file=True,
+        )
+        if path_error:
+            print(f"[FAIL] {path_error}")
+            return 1
     try:
         surface_snapshot = review_surface.capture(
             repo_root,
@@ -409,10 +673,29 @@ def main() -> int:
         return 1
 
     bundle_path = run_dir / "evidence/review-bundles" / registered_phase_key / review_id / f"{pass_id}.md"
-    bundle_path.parent.mkdir(parents=True, exist_ok=True)
     bundle_rel = normalize_repo_path(str(bundle_path.relative_to(repo_root)))
-    artifact_bytes = (repo_root / artifact_path).read_bytes()
-    artifact_content = artifact_bytes.decode("utf-8")
+    _checked_bundle_path, path_error = validate_safe_repo_path(
+        repo_root,
+        bundle_rel,
+        label="Immutable review bundle path",
+        require_regular_file=False,
+        allow_missing_leaf=True,
+    )
+    if path_error:
+        print(f"[FAIL] {path_error}")
+        return 1
+    if artifact_fs_path is None:
+        print("[FAIL] Artifact path must be a canonical regular non-symlink file")
+        return 1
+    artifact_bytes, read_error = read_regular_bytes(repo_root, artifact_fs_path, label="Artifact path")
+    if artifact_bytes is None:
+        print(f"[FAIL] {read_error}")
+        return 1
+    try:
+        artifact_content = artifact_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(f"[FAIL] Artifact path must be readable UTF-8: {exc}")
+        return 1
     artifact_content_hash = hashlib.sha256(artifact_bytes).hexdigest()
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -452,6 +735,12 @@ def main() -> int:
         f"- Normalized baseline: `{normalized_diff_basis['normalized_baseline']}`",
         f"- Normalized comparison: `{normalized_diff_basis['normalized_comparison']}`",
         f"- Normalized diff command: `{normalized_diff_basis['normalized_diff_command']}`",
+        f"- Tracked diff argv: `{json.dumps(normalized_diff_basis['tracked_diff_argv'], separators=(',', ':'))}`",
+        (
+            f"- Untracked files argv: `{json.dumps(normalized_diff_basis['untracked_files_argv'], separators=(',', ':'))}`"
+            if normalized_diff_basis["untracked_files_argv"] is not None
+            else "- Untracked files argv: none"
+        ),
         "",
     ])
     lines.extend(render_list("## Changed Files Reviewed", filtered_changed_files))
@@ -490,11 +779,56 @@ def main() -> int:
     lines.append("")
 
     bundle_content = "\n".join(lines)
+    expected_lists = {
+        "Changed Files Reviewed": filtered_changed_files,
+        "Upstream Artifacts To Re-read": upstream_artifacts,
+        "Relevant Addenda": addenda,
+        "Prior Recursive Evidence": prior_refs,
+        "Control-Plane Docs": control_docs,
+        "Targeted Code References": code_refs,
+        "Evidence References": evidence_refs,
+        "Audit Questions": audit_questions,
+    }
+    render_issues = validate_rendered_bundle(
+        bundle_content,
+        expected_snapshot=surface_snapshot,
+        expected_lists=expected_lists,
+    )
+    if render_issues:
+        print("[FAIL] Refusing to persist an invalid rendered review bundle:")
+        for issue in render_issues:
+            print(f"- {issue}")
+        return 1
     try:
-        with bundle_path.open("x", encoding="utf-8", newline="\n") as handle:
-            handle.write(bundle_content)
+        bundle_payload = bundle_content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        print(f"[FAIL] Rendered review bundle is not canonical UTF-8: {exc}")
+        return 1
+    directory_error = ensure_safe_directory_chain(
+        repo_root,
+        bundle_path.parent,
+        label="Immutable review bundle directory",
+    )
+    if directory_error:
+        print(f"[FAIL] {directory_error}")
+        return 1
+    _checked_bundle_path, path_error = validate_safe_repo_path(
+        repo_root,
+        bundle_rel,
+        label="Immutable review bundle path",
+        require_regular_file=False,
+        allow_missing_leaf=True,
+    )
+    if path_error:
+        print(f"[FAIL] {path_error}")
+        return 1
+    try:
+        write_exclusive_bundle(bundle_path, bundle_payload)
     except FileExistsError:
         print(f"[FAIL] Refusing to overwrite immutable review bundle: /{bundle_rel}")
+        return 1
+    except OSError as exc:
+        print(f"[FAIL] Unable to persist immutable review bundle: /{bundle_rel}: {exc}")
         return 1
 
     print(f"[OK] Wrote review bundle: /{bundle_rel}")

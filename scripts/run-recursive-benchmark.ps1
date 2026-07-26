@@ -1,10 +1,10 @@
 param(
-    [ValidateSet("local-first-planner", "team-capacity-board", "release-readiness-dashboard")]
+    [ValidateSet("local-first-planner", "team-capacity-board", "release-readiness-dashboard", "scientific-calculator-rust")]
     [string]$Scenario = "local-first-planner",
     [ValidateSet("codex", "kimi", "opencode", "all")]
     [string]$Runner = "all",
     [string]$WorkspaceRoot = "",
-    [string]$CodexModel = "gpt-5.1",
+    [string]$CodexModel = "gpt-5.4",
     [string]$KimiModel = "kimi-k2-5",
     [string]$OpenCodeModel = "opencode/gpt-5-nano",
     [int]$MaxMinutes = 60,
@@ -16,7 +16,8 @@ param(
     [double]$HintPenalty = 5,
     [switch]$ListScenarios,
     [switch]$PrepareOnly,
-    [switch]$SkipNpmInstall
+    [switch]$SkipNpmInstall,
+    [switch]$SkipDependencyProvisioning
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +75,9 @@ if ($PrepareOnly) {
 }
 if ($SkipNpmInstall) {
     $arguments += "--skip-npm-install"
+}
+if ($SkipDependencyProvisioning) {
+    $arguments += "--skip-dependency-provisioning"
 }
 
 & $python @arguments

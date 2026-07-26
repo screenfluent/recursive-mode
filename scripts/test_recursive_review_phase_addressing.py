@@ -97,13 +97,17 @@ Approval: PASS
         bundle_path = self.root / bundle_rel.lstrip("/")
         bundle_path.parent.mkdir(parents=True, exist_ok=True)
         baseline = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
-        surface_section = "\n".join(surface.render(surface.capture(
+        snapshot = surface.capture(
             self.root,
             run_id=self.run.name,
             baseline=baseline,
             comparison="working-tree",
             references=[],
-        )))
+        )
+        surface_section = "\n".join(surface.render(snapshot))
+        changed_lines = "\n".join(
+            surface.render_markdown_list([record["path"] for record in snapshot["changed"]])
+        )
         bundle = f"""Run: `/.recursive/run/{self.run.name}/`
 Phase: `{self.artifact_file}`
 Phase Key: `{self.phase_key}`
@@ -121,11 +125,29 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 ## Bundle Scope
 - immutable test bundle
 
+## Diff Basis
+- Baseline type: `local commit`
+- Baseline reference: `{baseline}`
+- Comparison reference: `working-tree`
+- Normalized baseline: `{baseline}`
+- Normalized comparison: `working-tree`
+- Normalized diff command: `git diff --name-only {baseline}`
+- Tracked diff argv: `["diff","--name-only","-z","{baseline}","--"]`
+- Untracked files argv: `["ls-files","--others","--exclude-standard","-z"]`
+
+## Changed Files Reviewed
+{changed_lines}
+
 {surface_section}
 """
         bundle_path.write_text(bundle, encoding="utf-8")
         bundle_hash = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
         pass_rel = self.pass_rel(pass_id)
+        changed_items = [record["path"] for record in snapshot["changed"]] or ["none"]
+        changed_scope = "\n".join(
+            f"  - `{path}`" if path != "none" else "  - none"
+            for path in changed_items
+        )
         ledger_content = f"""## Review Scope
 
 - Review ID: {self.review_id}
@@ -137,7 +159,7 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 - Artifact Hash: {bundle_hash}
 - Diff Basis: `{bundle_rel}`
 - Changed Files:
-  - `/.recursive/run/{self.run.name}/{self.artifact_file}`
+{changed_scope}
 - Evidence Basis:
   - `{bundle_rel}`
 
@@ -164,9 +186,9 @@ GeneratedAt: `2026-07-12T00:00:00Z`
         return ledger_path, digest
 
     def scheduled_finding(self, owner: str) -> str:
-        owner_phase_key = phase_rules.audited_phase_key(owner)
+        owner_phase_key = phase_rules.scheduling_phase_key(owner)
         if owner_phase_key is None:
-            raise ValueError(f"scheduled owner is not audited: {owner}")
+            raise ValueError(f"scheduled owner is not canonical: {owner}")
         destination = f"/.recursive/run/{self.run.name}/evidence/reviews/scheduled/{owner_phase_key}/inventory.md"
         return f"""### F-001
 
@@ -190,12 +212,24 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 - Controller verification: controller verified scheduling authority
 """
 
-    def write_handoff(self, owner: str) -> Path:
-        owner_phase_key = phase_rules.audited_phase_key(owner)
+    def write_handoff(self, owner: str, *, status: str = "pending") -> Path:
+        owner_phase_key = phase_rules.scheduling_phase_key(owner)
         if owner_phase_key is None:
-            raise ValueError(f"scheduled owner is not audited: {owner}")
+            raise ValueError(f"scheduled owner is not canonical: {owner}")
         destination = self.run / "evidence/reviews/scheduled" / owner_phase_key / "inventory.md"
         destination.parent.mkdir(parents=True, exist_ok=True)
+        record_key = f"{self.review_id}/F-001"
+        owner_path = self.run / owner
+        if status == "consumed":
+            owner_path.write_text(
+                f"# {owner}\n\n- Consumed Scheduled Handoff: `{record_key}`\n",
+                encoding="utf-8",
+            )
+        consumed_in = "none" if status == "pending" else f"/.recursive/run/{self.run.name}/{owner}"
+        consumption_record = "none" if status == "pending" else record_key
+        evidence_path = "none" if status == "pending" else consumed_in
+        evidence_hash = "none" if status == "pending" else hashlib.sha256(owner_path.read_bytes()).hexdigest()
+        controller = "none" if status == "pending" else "controller verified target evidence"
         destination.write_text(f"""# Scheduled Finding Handoff Inventory
 
 ## {self.review_id}/F-001
@@ -212,9 +246,12 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 - Verification: inspect the owner phase receipt
 - Owner phase: {owner}
 - Scheduling basis: `/.recursive/RECURSIVE.md` assigns this evidence to the owner phase
-- Status: pending
-- Consumed in: none
-- Controller verification: none
+- Status: {status}
+- Consumed in: {consumed_in if consumed_in == 'none' else f'`{consumed_in}`'}
+- Consumption record: {consumption_record}
+- Evidence Path: {evidence_path if evidence_path == 'none' else f'`{evidence_path}`'}
+- Evidence Hash: {evidence_hash}
+- Controller verification: {controller}
 """, encoding="utf-8")
         return destination
 
@@ -222,7 +259,7 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 class RecursiveReviewPhaseAddressingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         subprocess.run(["git", "-C", str(self.root), "config", "user.email", "test@example.com"], check=True)
         subprocess.run(["git", "-C", str(self.root), "config", "user.name", "Test"], check=True)
@@ -476,6 +513,29 @@ Status: `DRAFT`
         result = review.validate_ledger(self.root, ledger_path)
         self.assertTrue(any("regular non-symlink" in issue for issue in result.issues), result.issues)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_rejects_bundle_parent_windows_junction(self) -> None:
+        fixture = ReviewFixture(self.root, "01-as-is.md", run_id="junction-bundle")
+        ledger_path, _digest = fixture.write_terminal()
+        bundle = self.root / fixture.bundle_rel("0001").lstrip("/")
+        canonical_parent = bundle.parent
+        shadow_parent = self.root / "junction-shadow"
+        shadow_parent.mkdir()
+        shadow_bundle = shadow_parent / bundle.name
+        shadow_bundle.write_bytes(bundle.read_bytes())
+        bundle.unlink()
+        canonical_parent.rmdir()
+        junction = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(canonical_parent), str(shadow_parent)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if junction.returncode != 0:
+            self.skipTest(f"junction creation unavailable: {junction.stdout} {junction.stderr}")
+        result = review.validate_ledger(self.root, ledger_path)
+        self.assertTrue(any("non-reparse" in issue for issue in result.issues), result.issues)
+
     def test_scheduled_owner_must_be_strictly_later_than_generic_source(self) -> None:
         cases = (
             ("same", "02-to-be-plan.md", False),
@@ -493,6 +553,44 @@ Status: `DRAFT`
                     self.assertTrue(result.valid, result.issues)
                 else:
                     self.assertTrue(any("strictly later" in issue or "later canonical phase" in issue for issue in result.issues), result.issues)
+
+    def test_phase_4_can_schedule_phase_5_with_distinct_canonical_key(self) -> None:
+        self.assertIsNone(phase_rules.audited_phase_key("05-manual-qa.md"))
+        self.assertEqual(phase_rules.scheduling_phase_key("05-manual-qa.md"), "phase-5")
+        fixture = ReviewFixture(self.root, "04-test-summary.md", run_id="phase-5-owner")
+        finding = fixture.scheduled_finding("05-manual-qa.md")
+        ledger_path, _digest = fixture.write_terminal(findings=finding, pending="F-001")
+        inventory = fixture.write_handoff("05-manual-qa.md")
+        self.assertIn("/scheduled/phase-5/", f"/{inventory.relative_to(self.root)}")
+        self.assertTrue(review.validate_ledger(self.root, ledger_path).valid)
+
+        active, active_issues = review.get_active_scheduled_owner_phases(self.root, fixture.run)
+        self.assertEqual(active_issues, [])
+        self.assertEqual(active, {"05-manual-qa.md"})
+        pending = review.validate_scheduled_handoffs(self.root, fixture.run, "05-manual-qa.md")
+        self.assertTrue(any("unconsumed" in issue for issue in pending.issues), pending.issues)
+
+        fixture.write_handoff("05-manual-qa.md", status="consumed")
+        self.assertTrue(review.validate_scheduled_handoffs(self.root, fixture.run, "05-manual-qa.md").valid)
+        self.assertTrue(review.validate_ledger(self.root, ledger_path).valid)
+
+    def test_foreign_run_source_owner_cannot_override_inventory_directory_owner(self) -> None:
+        foreign = ReviewFixture(self.root, "03.5-code-review.md", run_id="foreign-owner-source")
+        foreign_finding = foreign.scheduled_finding("05-manual-qa.md")
+        foreign.write_terminal(findings=foreign_finding, pending="F-001")
+        foreign_inventory = foreign.write_handoff("05-manual-qa.md")
+
+        current = ReviewFixture(self.root, "03.5-code-review.md", run_id="current-owner-target")
+        current_inventory = (
+            current.run / "evidence/reviews/scheduled/phase-4/inventory.md"
+        )
+        current_inventory.parent.mkdir(parents=True, exist_ok=True)
+        current_inventory.write_bytes(foreign_inventory.read_bytes())
+
+        active, issues = review.get_active_scheduled_owner_phases(self.root, current.run)
+        self.assertEqual(active, {"04-test-summary.md"})
+        self.assertNotIn("05-manual-qa.md", active)
+        self.assertTrue(any("outside the active run" in issue for issue in issues), issues)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import ntpath
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +40,7 @@ CLAIMED_OUTCOMES = {"none", "fixed", "blocked"}
 HANDOFF_FIELDS = [
     "Source Ledger", "Finding ID", "Kind", "Location", "Observed", "Expected", "Contract",
     "Technical impact", "Required outcome", "Verification", "Owner phase", "Scheduling basis", "Status",
-    "Consumed in", "Controller verification",
+    "Consumed in", "Consumption record", "Evidence Path", "Evidence Hash", "Controller verification",
 ]
 FIELD_RE = re.compile(r"(?m)^- ([A-Za-z][A-Za-z0-9 /-]*):[ \t]*(.*?)\s*$")
 FINDING_HEADING_RE = re.compile(r"(?m)^### (F-[0-9]{3,})\s*$")
@@ -111,8 +115,64 @@ def normalized_snapshot_hash(content: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def content_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def has_path_indirection(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def regular_repo_file_without_indirection(repo_root: Path, path: Path) -> bool:
+    """Require a lexical in-repo regular file with no symlink/reparse component."""
+    try:
+        relative = path.relative_to(repo_root)
+    except ValueError:
+        return False
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        return False
+    try:
+        path.resolve(strict=True).relative_to(repo_root.resolve(strict=True))
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    cursor = repo_root
+    for part in relative.parts:
+        cursor = cursor / part
+        try:
+            metadata = os.lstat(cursor)
+        except OSError:
+            return False
+        if has_path_indirection(cursor):
+            return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+
+
+def read_bytes(repo_root: Path, path: Path) -> tuple[bytes | None, str | None]:
+    if not regular_repo_file_without_indirection(repo_root, path):
+        return None, "path must be a canonical in-repository regular non-symlink file"
+    try:
+        return path.read_bytes(), None
+    except OSError as exc:
+        return None, str(exc)
+
+
+def read_utf8(repo_root: Path, path: Path) -> tuple[str | None, str | None]:
+    payload, read_error = read_bytes(repo_root, path)
+    if payload is None:
+        return None, read_error
+    try:
+        return payload.decode("utf-8"), None
+    except UnicodeDecodeError as exc:
+        return None, str(exc)
+
+
+def content_hash(repo_root: Path, path: Path) -> tuple[str | None, str | None]:
+    payload, read_error = read_bytes(repo_root, path)
+    if payload is None:
+        return None, read_error
+    return hashlib.sha256(payload).hexdigest(), None
 
 
 def fence_transition(line: str, active: tuple[str, int] | None) -> tuple[str, int] | None:
@@ -232,8 +292,16 @@ def canonical_bundle_display(run_dir: Path, phase_key: str, review_id: str, pass
 
 
 def repo_path(repo_root: Path, raw: str) -> Path:
-    normalized = trim_value(raw).replace("\\", "/").lstrip("/")
-    return repo_root / normalized
+    normalized = trim_value(raw)
+    if os.name == "nt":
+        normalized = normalized.replace("\\", "/")
+    if ntpath.splitdrive(normalized)[0] or normalized.startswith("//"):
+        raise ValueError(f"invalid canonical repository path: {raw}")
+    if normalized.startswith("/"):
+        normalized = normalized[1:]
+    if not normalized or any(part in {"", ".", ".."} for part in normalized.split("/")):
+        raise ValueError(f"invalid canonical repository path: {raw}")
+    return repo_root.joinpath(*normalized.split("/"))
 
 
 def canonical_display(repo_root: Path, path: Path) -> str:
@@ -294,6 +362,16 @@ def list_values(body: str, field_name: str) -> list[str]:
     if not match:
         return []
     return [trim_value(line[4:].strip()) for line in match.group("items").splitlines() if line.startswith("  - ")]
+
+
+def section_bullet_values(content: str, heading: str) -> tuple[list[str], list[str]]:
+    body = section_body(content, heading)
+    if not body:
+        return [], [f"bundle is missing ## {heading}"]
+    try:
+        return review_surface.parse_markdown_list(body), []
+    except ValueError as exc:
+        return [], [f"bundle ## {heading} must use the exact canonical JSON-atom list schema: {exc}"]
 
 
 def parse_document(content: str) -> tuple[ReviewDocument | None, list[str]]:
@@ -459,11 +537,12 @@ def validate_finding_states(document: ReviewDocument, *, standalone: bool) -> li
     return issues
 
 
-def parse_handoff(path: Path, record_key: str) -> tuple[dict[str, str] | None, list[str]]:
+def parse_handoff(repo_root: Path, path: Path, record_key: str) -> tuple[dict[str, str] | None, list[str]]:
     issues: list[str] = []
-    if not path.is_file():
-        return None, [f"scheduled handoff does not exist: {path}"]
-    content = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    raw_content, read_error = read_utf8(repo_root, path)
+    if raw_content is None:
+        return None, [f"scheduled handoff must be readable UTF-8: {path}: {read_error}"]
+    content = raw_content.replace("\r\n", "\n").replace("\r", "\n")
     if not content.startswith("# Scheduled Finding Handoff Inventory\n"):
         issues.append(f"scheduled handoff has invalid title: {path}")
     headings = re.findall(r"(?m)^## (.+?)\s*$", content)
@@ -503,16 +582,19 @@ def validate_scheduled_finding(
         issues.append(f"{finding_id} scheduled Owner phase must be a later canonical phase")
     if ".recursive/RECURSIVE.md" not in basis:
         issues.append(f"{finding_id} Scheduling basis must cite /.recursive/RECURSIVE.md ownership")
-    owner_phase_key = phase_rules.audited_phase_key(owner) if owner else None
-    expected = f"/.recursive/run/{run_dir.name}/evidence/reviews/scheduled/{owner_phase_key or 'missing'}/inventory.md"
+    owner_phase_key = phase_rules.scheduling_phase_key(owner) if owner else None
+    if owner_phase_key is None:
+        issues.append(f"{finding_id} scheduled Owner phase has no canonical scheduling key")
+        return issues, "pending"
+    expected = f"/.recursive/run/{run_dir.name}/evidence/reviews/scheduled/{owner_phase_key}/inventory.md"
     if destination != expected:
         issues.append(f"{finding_id} scheduled Destination must be {expected}")
-    handoff_path = repo_path(repo_root, destination)
-    try:
-        handoff_path.resolve().relative_to(run_dir.resolve())
-    except ValueError:
-        issues.append(f"{finding_id} scheduled inventory must stay inside the active run")
-    fields, handoff_issues = parse_handoff(handoff_path, f"{review_id}/{finding_id}")
+        return issues, "pending"
+    handoff_path = repo_path(repo_root, expected)
+    if not regular_repo_file_without_indirection(repo_root, handoff_path):
+        issues.append(f"{finding_id} scheduled handoff must be a canonical regular non-symlink inventory: {expected}")
+        return issues, "pending"
+    fields, handoff_issues = parse_handoff(repo_root, handoff_path, f"{review_id}/{finding_id}")
     issues.extend(handoff_issues)
     if fields is None:
         return issues, "pending"
@@ -530,13 +612,66 @@ def validate_scheduled_finding(
     if status not in {"pending", "consumed"}:
         issues.append(f"{finding_id} scheduled handoff Status must be pending|consumed")
     consumed_in = fields.get("Consumed in", "")
+    consumption_record = fields.get("Consumption record", "")
+    evidence_path_value = fields.get("Evidence Path", "")
+    evidence_hash = fields.get("Evidence Hash", "")
     controller = fields.get("Controller verification", "")
-    if status == "pending" and (consumed_in != "none" or controller != "none"):
+    record_key = f"{review_id}/{finding_id}"
+    if status == "pending" and (
+        consumed_in != "none"
+        or consumption_record != "none"
+        or evidence_path_value != "none"
+        or evidence_hash != "none"
+        or controller != "none"
+    ):
         issues.append(f"{finding_id} pending handoff must have no consumption evidence")
     if status == "consumed":
         expected_consumed = f"/.recursive/run/{run_dir.name}/{owner}"
-        if consumed_in != expected_consumed or controller in {"", "none"}:
-            issues.append(f"{finding_id} consumed handoff requires target artifact and controller evidence")
+        if consumed_in != expected_consumed:
+            issues.append(f"{finding_id} consumed handoff must name canonical owner artifact {expected_consumed}")
+        owner_path = repo_path(repo_root, expected_consumed)
+        if not regular_repo_file_without_indirection(repo_root, owner_path):
+            issues.append(f"{finding_id} consumed handoff owner must be an existing regular non-symlink artifact")
+        else:
+            owner_content, owner_read_error = read_utf8(repo_root, owner_path)
+            if owner_content is None:
+                issues.append(f"{finding_id} consumed handoff owner must be readable UTF-8: {owner_read_error}")
+            elif re.search(
+                rf"(?m)^- Consumed Scheduled Handoff:\s*`?{re.escape(record_key)}`?\s*$",
+                owner_content,
+            ) is None:
+                issues.append(f"{finding_id} owner artifact must contain exact handoff backreference {record_key}")
+        if consumption_record != record_key:
+            issues.append(f"{finding_id} consumed handoff Consumption record must be {record_key}")
+        evidence_canonical = evidence_path_value
+        if os.name == "nt":
+            evidence_canonical = evidence_canonical.replace("\\", "/")
+        evidence_parts = Path(evidence_canonical.lstrip("/")).parts
+        if (
+            evidence_path_value in {"", "none"}
+            or not evidence_path_value.startswith("/")
+            or ntpath.splitdrive(evidence_path_value)[0]
+            or any(part in {"", ".", ".."} for part in evidence_parts)
+        ):
+            issues.append(f"{finding_id} consumed handoff Evidence Path must be a canonical repository address without path escape")
+        else:
+            try:
+                evidence_path = repo_path(repo_root, evidence_path_value)
+            except ValueError:
+                issues.append(f"{finding_id} consumed handoff Evidence Path must be a canonical repository address without path escape")
+            else:
+                if not regular_repo_file_without_indirection(repo_root, evidence_path):
+                    issues.append(f"{finding_id} consumed handoff requires an existing regular non-symlink Evidence Path")
+                elif evidence_path_value != canonical_display(repo_root, evidence_path):
+                    issues.append(f"{finding_id} consumed handoff Evidence Path must use its canonical repository address")
+                else:
+                    actual_evidence_hash, evidence_read_error = content_hash(repo_root, evidence_path)
+                    if actual_evidence_hash is None:
+                        issues.append(f"{finding_id} consumed handoff Evidence Path must be readable: {evidence_read_error}")
+                    elif evidence_hash != actual_evidence_hash:
+                        issues.append(f"{finding_id} consumed handoff Evidence Hash does not match Evidence Path")
+        if controller in {"", "none"}:
+            issues.append(f"{finding_id} consumed handoff requires controller verification")
     return issues, status or "pending"
 
 
@@ -561,12 +696,12 @@ def validate_bundle_scope(
     bundle_root = run_dir / "evidence/review-bundles"
     relative_parts = ("evidence", "review-bundles", phase_key, review_id, f"{pass_id}.md")
     cursor = run_dir
-    symlinked_component = False
+    indirect_component = False
     for part in relative_parts:
         cursor = cursor / part
-        symlinked_component = symlinked_component or cursor.is_symlink()
-    if symlinked_component:
-        issues.append(f"immutable review bundle must be a regular non-symlink file: {expected_bundle}")
+        indirect_component = indirect_component or has_path_indirection(cursor)
+    if indirect_component:
+        issues.append(f"immutable review bundle must be a regular non-symlink/non-reparse file: {expected_bundle}")
         return issues
     if not bundle_path.is_file():
         issues.append(f"immutable review bundle does not exist: {expected_bundle}")
@@ -580,9 +715,16 @@ def validate_bundle_scope(
     except (FileNotFoundError, ValueError, OSError):
         issues.append(f"immutable review bundle must resolve inside its canonical run: {expected_bundle}")
         return issues
-    if document.scope.get("Artifact Hash") != content_hash(bundle_path):
+    bundle_hash, bundle_hash_error = content_hash(repo_root, bundle_path)
+    if bundle_hash is None:
+        issues.append(f"immutable review bundle must be readable: {expected_bundle}: {bundle_hash_error}")
+        return issues
+    if document.scope.get("Artifact Hash") != bundle_hash:
         issues.append(f"immutable review bundle hash mismatch: {expected_bundle}")
-    content = bundle_path.read_text(encoding="utf-8")
+    content, bundle_read_error = read_utf8(repo_root, bundle_path)
+    if content is None:
+        issues.append(f"immutable review bundle must be readable UTF-8: {expected_bundle}: {bundle_read_error}")
+        return issues
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     header_lines: list[str] = []
     for line in normalized.split("\n"):
@@ -618,6 +760,83 @@ def validate_bundle_scope(
         issues.append(f"bundle Artifact Content Hash must be lowercase sha256: {expected_bundle}")
     if not HASH_RE.fullmatch(payload_hash):
         issues.append(f"bundle Audit Payload Hash must be lowercase sha256: {expected_bundle}")
+    snapshot, snapshot_issues = review_surface.parse(content)
+    issues.extend(snapshot_issues)
+    if snapshot is not None and not snapshot_issues:
+        if snapshot.get("run_id") != run_dir.name:
+            issues.append(f"reviewed surface run_id does not match review context: {expected_bundle}")
+        snapshot_changed = [record["path"] for record in snapshot.get("changed", [])]
+        bundle_changed, bundle_changed_issues = section_bullet_values(content, "Changed Files Reviewed")
+        issues.extend(bundle_changed_issues)
+        if bundle_changed != snapshot_changed:
+            issues.append("bundle Changed Files Reviewed must exactly equal Reviewed Surface Snapshot.changed")
+        expected_changed = snapshot_changed or ["none"]
+        ledger_changed = document.scope.get("Changed Files items", "").splitlines()
+        if ledger_changed != expected_changed:
+            issues.append("Review Scope Changed Files must exactly equal the immutable bundle snapshot")
+
+        diff_body = section_body(content, "Diff Basis")
+        diff_fields, diff_order, diff_duplicates = parse_fields(diff_body)
+        expected_diff_order = [
+            "Baseline type",
+            "Baseline reference",
+            "Comparison reference",
+            "Normalized baseline",
+            "Normalized comparison",
+            "Normalized diff command",
+            "Tracked diff argv",
+            "Untracked files argv",
+        ]
+        if residual_schema_lines(diff_body) or diff_duplicates or diff_order != expected_diff_order:
+            issues.append("bundle Diff Basis must use the exact canonical field schema")
+        if diff_fields.get("Normalized baseline") != snapshot.get("baseline"):
+            issues.append("bundle Diff Basis baseline must equal Reviewed Surface Snapshot.baseline")
+        if diff_fields.get("Normalized comparison") != snapshot.get("comparison"):
+            issues.append("bundle Diff Basis comparison must equal Reviewed Surface Snapshot.comparison")
+        expected_diff_command = (
+            f"git diff --name-only {snapshot['baseline']}"
+            if snapshot["comparison"] == "working-tree"
+            else f"git diff --name-only {snapshot['baseline']}..{snapshot['comparison']}"
+        )
+        if diff_fields.get("Normalized diff command") != expected_diff_command:
+            issues.append("bundle Normalized diff command must match the tracked comparison basis")
+        expected_tracked_argv = [
+            "diff",
+            "--name-only",
+            "-z",
+            (
+                snapshot["baseline"]
+                if snapshot["comparison"] == "working-tree"
+                else f"{snapshot['baseline']}..{snapshot['comparison']}"
+            ),
+            "--",
+        ]
+        expected_untracked_argv: list[str] | None = (
+            ["ls-files", "--others", "--exclude-standard", "-z"]
+            if snapshot["comparison"] == "working-tree"
+            else None
+        )
+        try:
+            tracked_argv = json.loads(diff_fields.get("Tracked diff argv", ""))
+        except json.JSONDecodeError:
+            tracked_argv = None
+        untracked_raw = diff_fields.get("Untracked files argv", "")
+        try:
+            untracked_argv = None if untracked_raw == "none" else json.loads(untracked_raw)
+        except json.JSONDecodeError:
+            untracked_argv = "invalid"
+        if tracked_argv != expected_tracked_argv:
+            issues.append("bundle Tracked diff argv must exactly reproduce Reviewed Surface Snapshot tracked membership")
+        if untracked_argv != expected_untracked_argv:
+            issues.append("bundle Untracked files argv must exactly reproduce Reviewed Surface Snapshot untracked membership")
+
+        if document.scope.get("Diff Basis") != expected_bundle:
+            issues.append("Review Scope Diff Basis must cite the exact immutable same-pass bundle")
+        snapshot_evidence = [record["path"] for record in snapshot.get("references", [])]
+        expected_evidence = [expected_bundle, *snapshot_evidence]
+        ledger_evidence = document.scope.get("Evidence Basis items", "").splitlines()
+        if ledger_evidence != expected_evidence:
+            issues.append("Review Scope Evidence Basis must exactly equal the bundle plus its referenced snapshot evidence")
     issues.extend(review_surface.validate(repo_root, content, current=current_surface))
     return issues
 
@@ -660,15 +879,26 @@ def validate_document(
         if value != "none" and not HASH_RE.fullmatch(value):
             issues.append(f"{field} must be none or lowercase sha256")
     if validate_reviewed_artifact:
-        artifact = repo_path(repo_root, scope.get("Reviewed Artifact", ""))
         try:
-            artifact.resolve().relative_to(repo_root.resolve())
+            artifact = repo_path(repo_root, scope.get("Reviewed Artifact", ""))
         except ValueError:
-            issues.append("Reviewed Artifact must stay inside the repository")
-        if not artifact.is_file():
-            issues.append("Reviewed Artifact does not exist as a repo file")
-        elif scope.get("Artifact Hash") != content_hash(artifact):
-            issues.append("Artifact Hash does not match Reviewed Artifact")
+            artifact = None
+            issues.append("Reviewed Artifact must be a canonical repository path")
+        if artifact is None:
+            pass
+        else:
+            try:
+                artifact.resolve().relative_to(repo_root.resolve())
+            except ValueError:
+                issues.append("Reviewed Artifact must stay inside the repository")
+            if not artifact.is_file():
+                issues.append("Reviewed Artifact does not exist as a repo file")
+            else:
+                artifact_hash_value, artifact_hash_error = content_hash(repo_root, artifact)
+                if artifact_hash_value is None:
+                    issues.append(f"Reviewed Artifact must be readable: {artifact_hash_error}")
+                elif scope.get("Artifact Hash") != artifact_hash_value:
+                    issues.append("Artifact Hash does not match Reviewed Artifact")
     if (
         run_dir is not None
         and source_artifact is not None
@@ -731,7 +961,11 @@ def validate_document(
         if finding.get("Disposition") in {"deferred", "out-of-scope"} and finding.get("Destination"):
             raw_destination = finding["Destination"]
             if not re.match(r"^https://", raw_destination):
-                destination = repo_path(repo_root, raw_destination)
+                try:
+                    destination = repo_path(repo_root, raw_destination)
+                except ValueError:
+                    issues.append(f"{finding_id} durable destination must be a canonical repository path")
+                    continue
                 try:
                     destination.resolve().relative_to(repo_root.resolve())
                 except ValueError:
@@ -777,7 +1011,14 @@ def validate_pass_history(
         issues.append("pass snapshots must be consecutive from 0001 through the current pass")
     parsed: dict[int, tuple[Path, ReviewDocument]] = {}
     for number, path in enumerate(snapshots, start=1):
-        document, parse_issues = parse_document(path.read_text(encoding="utf-8"))
+        if not regular_repo_file_without_indirection(repo_root, path):
+            issues.append(f"passes/{path.name}: snapshot must be a canonical regular non-symlink file")
+            continue
+        snapshot_content, snapshot_read_error = read_utf8(repo_root, path)
+        if snapshot_content is None:
+            issues.append(f"passes/{path.name}: snapshot must be readable UTF-8: {snapshot_read_error}")
+            continue
+        document, parse_issues = parse_document(snapshot_content)
         issues.extend(f"passes/{path.name}: {issue}" for issue in parse_issues)
         if document is None:
             continue
@@ -816,7 +1057,8 @@ def validate_pass_history(
                     if previous.findings[finding_id].get(field) != document.findings[finding_id].get(field):
                         issues.append(f"passes/{path.name}: immutable field changed for {finding_id}: {field}")
                 if previous.findings[finding_id].get("Disposition") != "open":
-                    for field in ("Disposition", "Claimed outcome", "Claimed changes", "Claimed verification", "Controller verification"):
+                    terminal_fields = sorted(set(previous.findings[finding_id]) | set(document.findings[finding_id]))
+                    for field in terminal_fields:
                         if previous.findings[finding_id].get(field) != document.findings[finding_id].get(field):
                             issues.append(f"passes/{path.name}: terminal finding reopened or changed for {finding_id}: {field}")
             for finding_id in current_ids[len(previous_ids):]:
@@ -858,7 +1100,8 @@ def validate_pass_history(
                     if previous.findings[finding_id].get(field) != current.findings[finding_id].get(field):
                         issues.append(f"working ledger immutable field changed for {finding_id}: {field}")
                 if previous.findings[finding_id].get("Disposition") != "open":
-                    for field in ("Disposition", "Claimed outcome", "Claimed changes", "Claimed verification", "Controller verification"):
+                    terminal_fields = sorted(set(previous.findings[finding_id]) | set(current.findings[finding_id]))
+                    for field in terminal_fields:
                         if previous.findings[finding_id].get(field) != current.findings[finding_id].get(field):
                             issues.append(f"working ledger terminal finding reopened or changed for {finding_id}: {field}")
             for finding_id in current_ids[len(previous_ids):]:
@@ -870,24 +1113,41 @@ def validate_pass_history(
     verified_pass = current.verdict.get("Verified Pass", "")
     verified_hash = current.verdict.get("Verified Pass Hash", "")
     if verified_pass != "none":
-        verified_path = repo_path(repo_root, verified_pass)
-        if not verified_path.is_file():
-            issues.append("Verified Pass snapshot does not exist")
+        try:
+            verified_path = repo_path(repo_root, verified_pass)
+        except ValueError:
+            issues.append("Verified Pass snapshot must use a canonical repository path")
+            return issues
+        if not regular_repo_file_without_indirection(repo_root, verified_path):
+            issues.append("Verified Pass snapshot must be a canonical regular non-symlink file")
         else:
             if verified_path != ledger_path.parent / "passes" / f"{current_pass:04d}.md":
                 issues.append("Verified Pass does not match the current pass canonical path")
-            if verified_hash != normalized_snapshot_hash(verified_path.read_text(encoding="utf-8")):
-                issues.append("Verified Pass Hash does not match snapshot content")
-            if ledger_path.read_bytes() != verified_path.read_bytes():
-                issues.append("terminal ledger must be byte-for-byte identical to its Verified Pass snapshot")
+            verified_content, verified_read_error = read_utf8(repo_root, verified_path)
+            if verified_content is None:
+                issues.append(f"Verified Pass snapshot must be readable UTF-8: {verified_read_error}")
+            else:
+                if verified_hash != normalized_snapshot_hash(verified_content):
+                    issues.append("Verified Pass Hash does not match snapshot content")
+                ledger_bytes, ledger_read_error = read_bytes(repo_root, ledger_path)
+                verified_bytes, verified_bytes_error = read_bytes(repo_root, verified_path)
+                if ledger_bytes is None:
+                    issues.append(f"terminal ledger must be readable: {ledger_read_error}")
+                elif verified_bytes is None:
+                    issues.append(f"Verified Pass snapshot must be readable: {verified_bytes_error}")
+                elif ledger_bytes != verified_bytes:
+                    issues.append("terminal ledger must be byte-for-byte identical to its Verified Pass snapshot")
     return issues
 
 
 def classify_ledger(repo_root: Path, ledger_path: Path) -> tuple[LedgerContext, list[str]]:
     try:
-        relative = ledger_path.resolve().relative_to(repo_root.resolve()).as_posix()
+        relative_path = ledger_path.relative_to(repo_root)
     except ValueError:
         return LedgerContext(False, None, None, None, None), ["ledger must live inside the repository control plane"]
+    if any(part in {"", ".", ".."} for part in relative_path.parts):
+        return LedgerContext(False, None, None, None, None), ["ledger path must be canonical without path escape"]
+    relative = relative_path.as_posix()
     run_match = re.fullmatch(
         r"[.]recursive/run/([^/]+)/evidence/reviews/([a-z0-9]+(?:-[a-z0-9]+)*)/([a-z0-9]+(?:-[a-z0-9]+)*)/ledger[.]md",
         relative,
@@ -907,14 +1167,26 @@ def classify_ledger(repo_root: Path, ledger_path: Path) -> tuple[LedgerContext, 
 
 
 def validate_ledger(repo_root: Path, ledger_path: Path) -> ValidationResult:
-    repo_root = repo_root.resolve()
-    ledger_path = ledger_path.resolve()
+    repo_root = repo_root.absolute()
+    if not ledger_path.is_absolute():
+        ledger_path = repo_root / ledger_path
     issues: list[str] = []
-    if not ledger_path.is_file():
-        return ValidationResult([f"ledger does not exist: {ledger_path}"], ledger_path=ledger_path)
+    if not regular_repo_file_without_indirection(repo_root, ledger_path):
+        return ValidationResult(
+            [f"ledger must be a canonical in-repository regular non-symlink file: {ledger_path}"],
+            ledger_path=ledger_path,
+        )
     context, path_issues = classify_ledger(repo_root, ledger_path)
     issues.extend(path_issues)
-    document, parse_issues = parse_document(ledger_path.read_text(encoding="utf-8"))
+    if path_issues:
+        return ValidationResult(issues, ledger_path=ledger_path)
+    ledger_content, ledger_read_error = read_utf8(repo_root, ledger_path)
+    if ledger_content is None:
+        return ValidationResult(
+            [f"ledger must be readable UTF-8: {ledger_path}: {ledger_read_error}"],
+            ledger_path=ledger_path,
+        )
+    document, parse_issues = parse_document(ledger_content)
     issues.extend(parse_issues)
     if document is None:
         return ValidationResult(issues, ledger_path=ledger_path)
@@ -976,13 +1248,25 @@ def validate_phase_artifact(repo_root: Path, run_dir: Path, artifact_path: Path)
     phase_key = phase_rules.audited_phase_key(artifact_file)
     if phase_key is None:
         return ValidationResult([f"phase artifact is not in the audited registry: {artifact_file}"])
-    content = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
+    if not regular_repo_file_without_indirection(repo_root, artifact_path):
+        return ValidationResult(
+            [
+                f"phase artifact must be a canonical in-repository regular non-symlink file: {artifact_path}",
+                f"{artifact_file} is missing Review Ledger Path",
+            ]
+        )
+    content, artifact_read_error = read_utf8(repo_root, artifact_path)
+    if content is None:
+        return ValidationResult([f"phase artifact must be readable UTF-8: {artifact_path}: {artifact_read_error}"])
     metadata, metadata_issues = parse_review_metadata(content)
     issues = list(metadata_issues)
     ledger_value = metadata.get("Review Ledger Path", "")
     if not ledger_value:
         return ValidationResult(issues + [f"{artifact_file} is missing Review Ledger Path"])
-    ledger_path = repo_path(repo_root, ledger_value)
+    try:
+        ledger_path = repo_path(repo_root, ledger_value)
+    except ValueError:
+        return ValidationResult(issues + [f"{artifact_file} Review Ledger Path must be canonical"])
     result = validate_ledger(repo_root, ledger_path)
     issues.extend(result.issues)
     context, context_issues = classify_ledger(repo_root, ledger_path)
@@ -1012,17 +1296,26 @@ def validate_phase_artifact(repo_root: Path, run_dir: Path, artifact_path: Path)
                 issues.append("Review Metadata Review ID does not match ledger")
             if bundle_value != expected_bundle or bundle_value != document.scope.get("Reviewed Artifact"):
                 issues.append("Review Metadata Review Bundle Path does not match phase/review/pass")
-            bundle_path = repo_path(repo_root, bundle_value)
+            try:
+                bundle_path = repo_path(repo_root, bundle_value)
+            except ValueError:
+                issues.append("Review Metadata Review Bundle Path must be canonical")
+                return ValidationResult(issues, ledger_path=ledger_path, document=document)
             if metadata.get("Review Bundle Hash") != document.scope.get("Artifact Hash"):
                 issues.append("Review Metadata Review Bundle Hash does not match ledger Artifact Hash")
-            if bundle_path.is_file():
-                bundle_content = bundle_path.read_text(encoding="utf-8")
+            if regular_repo_file_without_indirection(repo_root, bundle_path):
+                bundle_content, bundle_read_error = read_utf8(repo_root, bundle_path)
+                if bundle_content is None:
+                    issues.append(f"review bundle must be readable UTF-8: {bundle_read_error}")
+                    return ValidationResult(issues, ledger_path=ledger_path, document=document)
                 if get_artifact_field(bundle_content, "Artifact Path") != canonical_display(repo_root, artifact_path):
                     issues.append("review bundle Artifact Path does not match phase artifact")
                 if get_artifact_field(bundle_content, "Audit Payload Profile") != AUDIT_PAYLOAD_PROFILE:
                     issues.append("review bundle Audit Payload Profile is unsupported")
                 if get_artifact_field(bundle_content, "Audit Payload Hash") != audit_payload_hash(content):
                     issues.append("review bundle Audit Payload Hash does not match current phase receipt")
+            else:
+                issues.append("review bundle must be a canonical regular non-symlink file")
     return ValidationResult(issues, ledger_path=ledger_path, document=document)
 
 
@@ -1033,33 +1326,49 @@ def validate_handoff_record(
     record_key: str,
 ) -> tuple[dict[str, str] | None, list[str]]:
     issues: list[str] = []
-    fields, handoff_issues = parse_handoff(path, record_key)
+    if not regular_repo_file_without_indirection(repo_root, path):
+        return None, [f"scheduled handoff inventory must be a canonical regular non-symlink file: {path}"]
+    fields, handoff_issues = parse_handoff(repo_root, path, record_key)
     issues.extend(handoff_issues)
     if fields is None:
         return None, issues
+    directory_owner = phase_rules.scheduled_artifact_for_key(path.parent.name)
+    if directory_owner is not None:
+        fields["_Canonical owner"] = directory_owner
     key_match = re.fullmatch(r"([a-z0-9]+(?:-[a-z0-9]+)*)/(F-[0-9]{3,})", record_key)
     if key_match is None:
         issues.append(f"scheduled handoff record key is not <review-id>/F-*: {record_key}")
-    source_path = repo_path(repo_root, fields.get("Source Ledger", ""))
+    try:
+        source_path = repo_path(repo_root, fields.get("Source Ledger", ""))
+    except ValueError:
+        issues.append(f"scheduled handoff Source Ledger must be a canonical repository path: {record_key}")
+        return fields, issues
+    source_result = validate_ledger(repo_root, source_path)
+    issues.extend(f"scheduled handoff source {record_key}: {issue}" for issue in source_result.issues)
+    if source_result.document is None:
+        return fields, issues
     source_context, source_context_issues = classify_ledger(repo_root, source_path)
     issues.extend(f"scheduled handoff source {record_key}: {issue}" for issue in source_context_issues)
-    if (
+    source_is_current = not source_context_issues and not (
         source_context.run_dir is None
         or source_context.run_dir.resolve() != run_dir.resolve()
         or source_context.artifact_file is None
-    ):
+    )
+    if not source_is_current:
         issues.append(f"scheduled handoff Source Ledger is outside the active run or audited phase: {record_key}")
-    source_result = validate_ledger(repo_root, source_path)
-    issues.extend(f"scheduled handoff source {record_key}: {issue}" for issue in source_result.issues)
     if key_match is not None and source_result.document is not None:
         review_id, finding_id = key_match.groups()
         source_document = source_result.document
         source_finding = source_document.findings.get(finding_id)
+        source_matches = source_result.valid and source_is_current and not handoff_issues
         if source_document.scope.get("Review ID") != review_id:
             issues.append(f"scheduled handoff record key does not match source Review ID: {record_key}")
+            source_matches = False
         if source_finding is None or source_finding.get("Disposition") != "scheduled":
             issues.append(f"scheduled handoff has no scheduled source finding: {record_key}")
+            source_matches = False
         else:
+            source_owner = source_finding.get("Owner phase", "")
             expected_values = {
                 "Finding ID": finding_id,
                 "Kind": source_finding.get("Kind", ""),
@@ -1076,8 +1385,12 @@ def validate_handoff_record(
             for field, expected_value in expected_values.items():
                 if fields.get(field) != expected_value:
                     issues.append(f"scheduled handoff {record_key} {field} does not match source finding")
+                    source_matches = False
             if source_finding.get("Destination") != canonical_display(repo_root, path):
                 issues.append(f"scheduled handoff destination does not match source finding: {record_key}")
+                source_matches = False
+            if source_matches and phase_rules.scheduling_phase_key(source_owner) is not None:
+                fields["_Canonical owner"] = source_owner
     return fields, issues
 
 
@@ -1088,15 +1401,32 @@ def get_active_scheduled_owner_phases(repo_root: Path, run_dir: Path) -> tuple[s
     if not root.exists():
         return active, issues
     for path in sorted(root.rglob("inventory.md")):
-        content = path.read_text(encoding="utf-8")
+        if not regular_repo_file_without_indirection(repo_root, path):
+            issues.append(
+                f"scheduled handoff inventory must be a canonical regular non-symlink file: "
+                f"{canonical_display(repo_root, path)}"
+            )
+            continue
+        content, read_error = read_utf8(repo_root, path)
+        if content is None:
+            issues.append(
+                f"scheduled handoff inventory must be readable UTF-8: "
+                f"{canonical_display(repo_root, path)}: {read_error}"
+            )
+            continue
         headings = re.findall(r"(?m)^## (.+?)\s*$", content)
         if not headings:
             issues.append(f"scheduled handoff inventory has no records: {canonical_display(repo_root, path)}")
         for record_key in headings:
             fields, record_issues = validate_handoff_record(repo_root, run_dir, path, record_key)
             issues.extend(record_issues)
-            if fields is not None and not record_issues and fields.get("Status") == "pending":
-                active.add(fields.get("Owner phase", ""))
+            if fields is not None:
+                owner = fields.get("_Canonical owner", "")
+                if (
+                    phase_rules.scheduling_phase_key(owner) is not None
+                    and (fields.get("Status") == "pending" or bool(record_issues))
+                ):
+                    active.add(owner)
     return active, sorted(set(issues))
 
 
@@ -1106,7 +1436,19 @@ def validate_scheduled_handoffs(repo_root: Path, run_dir: Path, target_artifact:
     if not root.exists():
         return ValidationResult()
     for path in sorted(root.rglob("inventory.md")):
-        content = path.read_text(encoding="utf-8")
+        if not regular_repo_file_without_indirection(repo_root, path):
+            issues.append(
+                f"scheduled handoff inventory must be a canonical regular non-symlink file: "
+                f"{canonical_display(repo_root, path)}"
+            )
+            continue
+        content, read_error = read_utf8(repo_root, path)
+        if content is None:
+            issues.append(
+                f"scheduled handoff inventory must be readable UTF-8: "
+                f"{canonical_display(repo_root, path)}: {read_error}"
+            )
+            continue
         headings = re.findall(r"(?m)^## (.+?)\s*$", content)
         if not headings:
             issues.append(f"scheduled handoff inventory has no records: {canonical_display(repo_root, path)}")
@@ -1115,7 +1457,7 @@ def validate_scheduled_handoffs(repo_root: Path, run_dir: Path, target_artifact:
             issues.extend(handoff_issues)
             if fields is None:
                 continue
-            owner = fields.get("Owner phase", "")
+            owner = fields.get("_Canonical owner", "")
             applies = target_artifact is None or owner == target_artifact or target_artifact == "08-memory-impact.md"
             if applies and fields.get("Status") != "consumed":
                 issues.append(f"unconsumed scheduled handoff blocks {target_artifact or 'closeout'}: {canonical_display(repo_root, path)}#{record_key}")
@@ -1140,7 +1482,12 @@ def main() -> int:
     args = parser.parse_args()
     repo_root = Path(args.repo_root).resolve()
     if args.ledger:
-        result = validate_ledger(repo_root, repo_path(repo_root, args.ledger))
+        try:
+            ledger_path = repo_path(repo_root, args.ledger)
+        except ValueError as exc:
+            print(f"[FAIL] {exc}")
+            return 1
+        result = validate_ledger(repo_root, ledger_path)
     elif args.run_id is not None:
         if not phase_rules.is_canonical_run_id(args.run_id):
             print(f"[FAIL] {phase_rules.CANONICAL_RUN_ID_ERROR}")

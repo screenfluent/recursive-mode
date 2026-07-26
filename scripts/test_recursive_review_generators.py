@@ -32,12 +32,13 @@ def load_module(path: Path, name: str):
 
 LINT = load_module(RUNTIME / "lint-recursive-run.py", "review_generator_lint")
 STATUS = load_module(RUNTIME / "recursive-status.py", "review_generator_status")
+SURFACE = load_module(RUNTIME / "recursive_review_surface.py", "review_generator_surface")
 
 
 class RecursiveReviewGeneratorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.repo = Path(self.temp.name)
+        self.repo = Path(self.temp.name).resolve()
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "test@example.com"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Test"], check=True)
@@ -82,8 +83,21 @@ class RecursiveReviewGeneratorTest(unittest.TestCase):
         self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
         bundle = self.run / "evidence/review-bundles/phase-2/plan-review/0001.md"
         bundle_hash = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        snapshot, snapshot_issues = SURFACE.parse(bundle.read_text(encoding="utf-8"))
+        self.assertIsNotNone(snapshot, snapshot_issues)
+        self.assertEqual(snapshot_issues, [])
+        changed_items = [record["path"] for record in snapshot["changed"]] or ["none"]
+        changed_scope = "\n".join(
+            f"  - `{path}`" if path != "none" else "  - none"
+            for path in changed_items
+        )
         ledger = self.run / "evidence/reviews/phase-2/plan-review/ledger.md"
         ledger.parent.mkdir(parents=True)
+        evidence_basis = [
+            "  - `/.recursive/run/demo/evidence/review-bundles/phase-2/plan-review/0001.md`",
+        ]
+        if evidence_ref is not None:
+            evidence_basis.append(f"  - `{evidence_ref.lstrip('/')}`")
         ledger.write_text(f"""## Review Scope
 
 - Review ID: plan-review
@@ -95,9 +109,9 @@ class RecursiveReviewGeneratorTest(unittest.TestCase):
 - Artifact Hash: {bundle_hash}
 - Diff Basis: `/.recursive/run/demo/evidence/review-bundles/phase-2/plan-review/0001.md`
 - Changed Files:
-  - `/.recursive/run/demo/02-to-be-plan.md`
+{changed_scope}
 - Evidence Basis:
-  - `/.recursive/run/demo/evidence/review-bundles/phase-2/plan-review/0001.md`
+{chr(10).join(evidence_basis)}
 
 ## Findings
 
@@ -139,12 +153,23 @@ class RecursiveReviewGeneratorTest(unittest.TestCase):
         )
 
     def test_bundle_emits_protocol_pointer_and_canonical_ledger(self) -> None:
+        (self.repo / "untracked-product.txt").write_text("new\n", encoding="utf-8")
         result = self.run_script(BUNDLE, "--run-id", "demo", "--phase", "03.5 Code Review", "--role", "code-reviewer",
             "--artifact-path", "/.recursive/run/demo/03.5-code-review.md", "--review-id", "implementation-review",
             "--pass", "0001")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         content = (self.run / "evidence/review-bundles/phase-3-5/implementation-review/0001.md").read_text(encoding="utf-8")
         self.assertIn("Review Ledger Path: `/.recursive/run/demo/evidence/reviews/phase-3-5/implementation-review/ledger.md`", content)
+        self.assertIn(
+            f'- Tracked diff argv: `["diff","--name-only","-z","{self.baseline}","--"]`',
+            content,
+        )
+        self.assertIn(
+            '- Untracked files argv: `["ls-files","--others","--exclude-standard","-z"]`',
+            content,
+        )
+        self.assertIn(f"- {SURFACE.render_markdown_atom('product.txt')}", content)
+        self.assertIn(f"- {SURFACE.render_markdown_atom('untracked-product.txt')}", content)
         self.assertIn("`/.agents/skills/recursive-review/references/finding-protocol.md`", content)
         for heading in ("`## Review Scope`", "`## Findings`", "`## Verdict`"):
             self.assertIn(heading, content)
@@ -219,6 +244,64 @@ class RecursiveReviewGeneratorTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Run ID must be a canonical", result.stdout)
         self.assertFalse((self.repo / "outside").exists())
+
+    def test_bundle_rejects_nested_indirection_and_path_escape_before_creation(self) -> None:
+        outside = self.repo / "outside"
+        outside.mkdir()
+        (outside / "evidence.txt").write_text("outside\n", encoding="utf-8")
+        evidence_parent = self.run / "evidence-input"
+        evidence_parent.symlink_to(outside, target_is_directory=True)
+        for review_id, reference in (
+            ("nested-symlink-review", "/.recursive/run/demo/evidence-input/evidence.txt"),
+            ("escape-review", "../outside/evidence.txt"),
+        ):
+            with self.subTest(reference=reference):
+                result = self.run_script(
+                    BUNDLE,
+                    "--run-id", "demo", "--phase", "03.5 Code Review", "--role", "code-reviewer",
+                    "--artifact-path", "/.recursive/run/demo/03.5-code-review.md",
+                    "--review-id", review_id, "--pass", "0001",
+                    "--evidence-ref", reference,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(
+                    "symlink or reparse" in result.stdout.lower() or "path escape" in result.stdout.lower(),
+                    result.stdout,
+                )
+                self.assertFalse(
+                    (self.run / f"evidence/review-bundles/phase-3-5/{review_id}/0001.md").exists()
+                )
+
+        artifact = self.run / "03.5-code-review.md"
+        artifact.unlink()
+        artifact.symlink_to(outside / "evidence.txt")
+        artifact_result = self.run_script(
+            BUNDLE,
+            "--run-id", "demo", "--phase", "03.5 Code Review", "--role", "code-reviewer",
+            "--artifact-path", "/.recursive/run/demo/03.5-code-review.md",
+            "--review-id", "artifact-symlink-review", "--pass", "0001",
+        )
+        self.assertNotEqual(artifact_result.returncode, 0)
+        self.assertIn("symlink or reparse", artifact_result.stdout.lower())
+        self.assertFalse(
+            (self.run / "evidence/review-bundles/phase-3-5/artifact-symlink-review/0001.md").exists()
+        )
+        artifact.unlink()
+        artifact.write_text("# Review\n", encoding="utf-8")
+
+        output_target = outside / "bundle-output"
+        output_target.mkdir()
+        output_link = self.run / "evidence"
+        output_link.symlink_to(output_target, target_is_directory=True)
+        result = self.run_script(
+            BUNDLE,
+            "--run-id", "demo", "--phase", "03.5 Code Review", "--role", "code-reviewer",
+            "--artifact-path", "/.recursive/run/demo/03.5-code-review.md",
+            "--review-id", "output-symlink-review", "--pass", "0001",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink or reparse", result.stdout.lower())
+        self.assertFalse((output_target / "review-bundles/phase-3-5/output-symlink-review/0001.md").exists())
 
     def test_action_record_emits_structured_claims_without_disposition(self) -> None:
         _ledger, _bundle = self.create_working_review()
@@ -728,7 +811,10 @@ Phase: `02 TO-BE`
                     "--evidence-ref", reference,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("regular file", result.stdout.lower())
+                self.assertTrue(
+                    "regular" in result.stdout.lower() or "symlink or reparse" in result.stdout.lower(),
+                    result.stdout,
+                )
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

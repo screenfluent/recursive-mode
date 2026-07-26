@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,8 +33,34 @@ def execution_mode_tokens(value: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", value.lower()))
 
 
-def normalize_repo_path(raw_path: str) -> str:
-    return raw_path.replace("\\", "/").strip().lstrip("/")
+def normalize_cli_repo_path(raw_path: str, option_name: str) -> tuple[str | None, str | None]:
+    normalized, issue = review_action.normalize_repo_path_argument(raw_path)
+    if issue:
+        return None, f"{option_name} {issue}."
+    return normalized, None
+
+
+def normalize_cli_repo_path_list(
+    raw_paths: list[str],
+    option_name: str,
+) -> tuple[list[str], str | None]:
+    normalized_paths: list[str] = []
+    for raw_path in raw_paths:
+        normalized, issue = normalize_cli_repo_path(raw_path, option_name)
+        if issue or normalized is None:
+            return [], issue or f"{option_name} repository path is invalid."
+        normalized_paths.append(normalized)
+    return sorted(set(normalized_paths)), None
+
+
+def normalize_optional_cli_repo_path(
+    raw_path: str,
+    option_name: str,
+) -> tuple[str, str | None]:
+    if raw_path == "":
+        return "", None
+    normalized, issue = normalize_cli_repo_path(raw_path, option_name)
+    return normalized or "", issue
 
 
 def slugify(value: str) -> str:
@@ -43,19 +71,21 @@ def slugify(value: str) -> str:
 
 def render_path_list(title: str, values: list[str]) -> list[str]:
     lines = [title]
+    item_prefix = "  - " if title.startswith("- ") else "- "
     if not values:
-        lines.append("- none")
+        lines.append(f"{item_prefix}none")
         return lines
-    lines.extend(f"- `{value}`" for value in values)
+    lines.extend(f"{item_prefix}`{value}`" for value in values)
     return lines
 
 
 def render_text_list(title: str, values: list[str]) -> list[str]:
     lines = [title]
+    item_prefix = "  - " if title.startswith("- ") else "- "
     if not values:
-        lines.append("- none")
+        lines.append(f"{item_prefix}none")
         return lines
-    lines.extend(f"- {value}" for value in values)
+    lines.extend(f"{item_prefix}{value}" for value in values)
     return lines
 
 
@@ -65,7 +95,7 @@ def render_claim_values(title: str, values: list[str], *, paths: bool = False) -
         lines.append("  - none")
         return lines
     for value in values:
-        rendered = f"/{normalize_repo_path(value)}" if paths else value
+        rendered = review_action.repo_path_display(value) if paths else value
         lines.append(f"  - `{rendered}`" if paths else f"  - {rendered}")
     return lines
 
@@ -75,12 +105,75 @@ def content_sha256(content: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def safe_existing_directory(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and not bool(attributes & reparse_flag)
+    )
+
+
+def write_new_action_record(path: Path, content: str) -> str | None:
+    """Create one new regular leaf atomically; never follow or replace an existing leaf."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return "Output action record already exists; refusing to follow or overwrite it."
+    except OSError as error:
+        return f"Output action record could not be created safely: {error}"
+
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            descriptor = -1
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return "New output action record is not a unique regular file."
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return "Output action record became hard-linked or non-regular during creation."
+    except (OSError, UnicodeError) as error:
+        return f"Output action record could not be written safely: {error}"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    try:
+        leaf_metadata = path.lstat()
+    except OSError as error:
+        return f"Output action record could not be verified safely: {error}"
+    attributes = getattr(leaf_metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        not stat.S_ISREG(leaf_metadata.st_mode)
+        or stat.S_ISLNK(leaf_metadata.st_mode)
+        or bool(attributes & reparse_flag)
+        or leaf_metadata.st_nlink != 1
+        or (leaf_metadata.st_dev, leaf_metadata.st_ino) != (metadata.st_dev, metadata.st_ino)
+    ):
+        return "Output action record leaf changed or became unsafe during creation."
+    return None
+
+
 def parse_finding_values(values: list[str], option_name: str) -> tuple[dict[str, list[str]], str | None]:
     parsed: dict[str, list[str]] = {}
     for raw in values:
+        if raw != raw.strip() or "\r" in raw or "\n" in raw:
+            return {}, f"{option_name} cannot contain boundary whitespace, CR, or LF."
         finding_id, separator, value = raw.partition("=")
-        finding_id = finding_id.strip()
-        value = value.strip()
+        if finding_id != finding_id.strip() or value != value.strip():
+            return {}, f"{option_name} must not contain whitespace around '='."
         if not separator or not FINDING_ID_RE.fullmatch(finding_id) or int(finding_id.split("-", 1)[1]) == 0 or not value:
             return {}, f"{option_name} must use F-NNN=value."
         parsed.setdefault(finding_id, []).append(value)
@@ -158,6 +251,43 @@ def main() -> int:
     parser.add_argument("--output-name", default="", help="Optional action record filename under subagents/.")
     args = parser.parse_args()
 
+    scalar_repo_path_options = {
+        "artifact_path": "--artifact-path",
+        "review_bundle": "--review-bundle",
+        "review_ledger": "--review-ledger",
+        "routing_config_path": "--routing-config-path",
+        "routing_discovery_path": "--routing-discovery-path",
+        "prompt_bundle_path": "--prompt-bundle-path",
+    }
+    for attribute, option_name in scalar_repo_path_options.items():
+        normalized, issue = normalize_optional_cli_repo_path(getattr(args, attribute), option_name)
+        if issue:
+            print(f"[FAIL] {issue}")
+            return 1
+        setattr(args, attribute, normalized)
+
+    list_repo_path_options = {
+        "upstream_artifact": "--upstream-artifact",
+        "addendum": "--addendum",
+        "code_ref": "--code-ref",
+        "memory_ref": "--memory-ref",
+        "created_file": "--created-file",
+        "modified_file": "--modified-file",
+        "reviewed_file": "--reviewed-file",
+        "untouched_file": "--untouched-file",
+        "artifact_read": "--artifact-read",
+        "artifact_updated": "--artifact-updated",
+        "evidence_used": "--evidence-used",
+        "verification_path": "--verification-path",
+        "output_capture_path": "--output-capture-path",
+    }
+    for attribute, option_name in list_repo_path_options.items():
+        normalized, issue = normalize_cli_repo_path_list(getattr(args, attribute), option_name)
+        if issue:
+            print(f"[FAIL] {issue}")
+            return 1
+        setattr(args, attribute, normalized)
+
     repo_root = Path(args.repo_root).resolve()
     run_id = args.run_id
     if not phase_rules.is_canonical_run_id(run_id):
@@ -165,15 +295,19 @@ def main() -> int:
         return 1
     run_root = repo_root / ".recursive" / "run"
     run_dir = run_root / run_id
-    if run_dir.is_symlink() or run_dir.resolve().parent != run_root.resolve():
+    for component in (repo_root / ".recursive", run_root, run_dir):
+        if not safe_existing_directory(component):
+            print(f"[FAIL] Run path component must be an existing regular directory without indirection: {component}")
+            return 1
+    if (
+        run_root.resolve(strict=True).parent != (repo_root / ".recursive").resolve(strict=True)
+        or run_dir.resolve(strict=True).parent != run_root.resolve(strict=True)
+    ):
         print("[FAIL] Resolved run directory must remain directly beneath the repository run root.")
         return 1
-    if not run_dir.exists():
-        print(f"[FAIL] Run directory not found: {run_dir}")
-        return 1
 
-    review_ledger = normalize_repo_path(args.review_ledger) if args.review_ledger.strip() else ""
-    bundle_path = normalize_repo_path(args.review_bundle) if args.review_bundle.strip() else ""
+    review_ledger = args.review_ledger
+    bundle_path = args.review_bundle
     finding_claims, claim_error = parse_finding_values(args.finding_claim, "--finding-claim")
     finding_changes, change_error = parse_finding_values(args.finding_change, "--finding-change")
     finding_verification, verification_error = parse_finding_values(args.finding_verification, "--finding-verification")
@@ -181,6 +315,14 @@ def main() -> int:
     if structured_error:
         print(f"[FAIL] {structured_error}")
         return 1
+    normalized_finding_changes: dict[str, list[str]] = {}
+    for finding_id, values in finding_changes.items():
+        normalized, issue = normalize_cli_repo_path_list(values, "--finding-change")
+        if issue:
+            print(f"[FAIL] {issue}")
+            return 1
+        normalized_finding_changes[finding_id] = normalized
+    finding_changes = normalized_finding_changes
     structured_error = validate_finding_claims(finding_claims, finding_changes, finding_verification)
     if structured_error:
         print(f"[FAIL] {structured_error}")
@@ -211,9 +353,17 @@ def main() -> int:
         if not ledger_match:
             print("[FAIL] Review Ledger must use the canonical active-run audited-phase evidence path.")
             return 1
-    if review_ledger and not (repo_root / review_ledger).is_file():
-        print(f"[FAIL] Review ledger not found: /{review_ledger}")
-        return 1
+    review_ledger_path: Path | None = None
+    if review_ledger:
+        _ledger_content, review_ledger_path, ledger_read_issues = review_action.read_confined_repo_text(
+            repo_root,
+            review_action.repo_path_display(review_ledger),
+        )
+        if review_ledger_path is None:
+            print(f"[FAIL] Review ledger could not be read safely: /{review_ledger}")
+            for issue in ledger_read_issues:
+                print(f"- {issue}")
+            return 1
     if lossless_action:
         if not bundle_path:
             print("[FAIL] Review/repair action records require --review-bundle.")
@@ -229,11 +379,17 @@ def main() -> int:
         if not bundle_match or int(bundle_match.group("review_pass")) == 0:
             print("[FAIL] Review Bundle must use the canonical active-run phase/review/pass path matching the Review Ledger.")
             return 1
-        bundle_file = repo_root / bundle_path
-        if not bundle_file.is_file() or bundle_file.is_symlink():
-            print(f"[FAIL] Canonical immutable review bundle not found: /{bundle_path}")
+        _bundle_content, bundle_file, bundle_read_issues = review_action.read_confined_repo_text(
+            repo_root,
+            review_action.repo_path_display(bundle_path),
+        )
+        if bundle_file is None:
+            print(f"[FAIL] Canonical immutable review bundle could not be read safely: /{bundle_path}")
+            for issue in bundle_read_issues:
+                print(f"- {issue}")
             return 1
-        ledger_result = review_ledger_contract.validate_ledger(repo_root, repo_root / review_ledger)
+        assert review_ledger_path is not None
+        ledger_result = review_ledger_contract.validate_ledger(repo_root, review_ledger_path)
         if not ledger_result.valid or ledger_result.document is None:
             print("[FAIL] Review Ledger failed the shared lossless validator:")
             for issue in ledger_result.issues:
@@ -249,6 +405,22 @@ def main() -> int:
                 print(f"[FAIL] {issue}")
             return 1
 
+    artifact_path = args.artifact_path
+    artifact_hash = ""
+    if artifact_path:
+        artifact_file = repo_root / Path(artifact_path)
+        if artifact_file.exists() or review_ledger_contract.has_path_indirection(artifact_file):
+            artifact_content, confined_artifact, artifact_read_issues = review_action.read_confined_repo_text(
+                repo_root,
+                review_action.repo_path_display(artifact_path),
+            )
+            if artifact_content is None or confined_artifact is None:
+                print("[FAIL] Current Artifact must be a confined unique regular strict-UTF-8 file.")
+                for issue in artifact_read_issues:
+                    print(f"- {issue}")
+                return 1
+            artifact_hash = content_sha256(artifact_content)
+
     subagents_dir = run_dir / "subagents"
     if subagents_dir.is_symlink():
         print("[FAIL] Subagent action directory cannot be a symlink.")
@@ -257,11 +429,11 @@ def main() -> int:
     if subagents_dir.resolve().parent != run_dir.resolve():
         print("[FAIL] Resolved subagent action directory must remain directly beneath the run directory.")
         return 1
-
-    artifact_path = normalize_repo_path(args.artifact_path) if args.artifact_path.strip() else ""
-    artifact_hash = ""
-    if artifact_path and (repo_root / artifact_path).exists():
-        artifact_hash = content_sha256((repo_root / artifact_path).read_text(encoding="utf-8"))
+    directory_validation = review_action.validate_action_record_path(repo_root, run_dir)
+    if not directory_validation.valid:
+        for issue in directory_validation.issues:
+            print(f"[FAIL] {issue}")
+        return 1
 
     diff_basis = args.diff_basis.strip() or "See /.recursive/run/<run-id>/00-worktree.md for the normalized diff basis used."
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -275,29 +447,29 @@ def main() -> int:
     output_name = normalized_output_name
     if not output_name.lower().endswith(".md"):
         output_name = f"{output_name}.md"
-    output_path = (subagents_dir / output_name).resolve()
-    if output_path.parent != subagents_dir.resolve():
+    output_path = subagents_dir / output_name
+    if output_path.parent != subagents_dir or output_path.parent.resolve() != subagents_dir.resolve():
         print("[FAIL] Resolved output path must remain directly beneath the run subagents directory.")
         return 1
-    output_rel = normalize_repo_path(str(output_path.relative_to(repo_root)))
+    output_rel = output_path.relative_to(repo_root).as_posix()
 
-    upstream_artifacts = sorted(set(normalize_repo_path(value) for value in args.upstream_artifact if value.strip()))
-    addenda = sorted(set(normalize_repo_path(value) for value in args.addendum if value.strip()))
-    code_refs = sorted(set(normalize_repo_path(value) for value in args.code_ref if value.strip()))
-    memory_refs = sorted(set(normalize_repo_path(value) for value in args.memory_ref if value.strip()))
-    created_files = sorted(set(normalize_repo_path(value) for value in args.created_file if value.strip()))
-    modified_files = sorted(set(normalize_repo_path(value) for value in args.modified_file if value.strip()))
-    reviewed_files = sorted(set(normalize_repo_path(value) for value in args.reviewed_file if value.strip()))
-    untouched_files = sorted(set(normalize_repo_path(value) for value in args.untouched_file if value.strip()))
-    artifacts_read = sorted(set(normalize_repo_path(value) for value in args.artifact_read if value.strip()))
-    artifacts_updated = sorted(set(normalize_repo_path(value) for value in args.artifact_updated if value.strip()))
-    evidence_used = sorted(set(normalize_repo_path(value) for value in args.evidence_used if value.strip()))
+    upstream_artifacts = args.upstream_artifact
+    addenda = args.addendum
+    code_refs = args.code_ref
+    memory_refs = args.memory_ref
+    created_files = args.created_file
+    modified_files = args.modified_file
+    reviewed_files = args.reviewed_file
+    untouched_files = args.untouched_file
+    artifacts_read = args.artifact_read
+    artifacts_updated = args.artifact_updated
+    evidence_used = args.evidence_used
     actions_taken = [value.strip() for value in args.action_taken if value.strip()]
-    verification_paths = sorted(set(normalize_repo_path(value) for value in args.verification_path if value.strip()))
-    output_capture_paths = sorted(set(normalize_repo_path(value) for value in args.output_capture_path if value.strip()))
-    routing_config_path = normalize_repo_path(args.routing_config_path) if args.routing_config_path.strip() else ""
-    routing_discovery_path = normalize_repo_path(args.routing_discovery_path) if args.routing_discovery_path.strip() else ""
-    prompt_bundle_path = normalize_repo_path(args.prompt_bundle_path) if args.prompt_bundle_path.strip() else ""
+    verification_paths = args.verification_path
+    output_capture_paths = args.output_capture_path
+    routing_config_path = args.routing_config_path
+    routing_discovery_path = args.routing_discovery_path
+    prompt_bundle_path = args.prompt_bundle_path
 
     lines: list[str] = [
         "# Subagent Action Record",
@@ -372,11 +544,24 @@ def main() -> int:
         lines.extend(render_text_list("## Claimed Findings", args.finding))
         lines.append("")
     lines.append("## Verification Handoff")
-    lines.extend(render_path_list("- Inspect first:", [f"/{value}" if value.startswith(".recursive/") else value for value in verification_paths]))
+    lines.extend(render_path_list("- Inspect first:", [f"/{value}" for value in verification_paths]))
     lines.extend(render_text_list("- Notes:", args.verification_item))
     lines.append("")
 
-    output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    rendered_content = "\n".join(lines)
+    schema_validation = review_action.validate_full_action_record(
+        rendered_content,
+        expected_action_record_path=review_action.repo_path_display(output_rel),
+    )
+    if not schema_validation.valid:
+        print("[FAIL] Refusing to persist an action record that violates the canonical grammar:")
+        for issue in schema_validation.issues:
+            print(f"- {issue}")
+        return 1
+    write_error = write_new_action_record(output_path, rendered_content)
+    if write_error:
+        print(f"[FAIL] {write_error}")
+        return 1
     print(f"[OK] Wrote subagent action record: /{output_rel}")
     return 0
 

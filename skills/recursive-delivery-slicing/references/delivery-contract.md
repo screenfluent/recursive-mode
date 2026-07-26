@@ -20,7 +20,7 @@ Use one delivery tree after the human approves both multi-run routing and the pr
 
 ## spec.md
 
-`spec.md` is the approved delivery-level requirements source produced by `recursive-spec`. It keeps the user outcome, requirements and acceptance criteria, testing decisions, pre-agreed seams, constraints and explicit out of scope boundary. Keep volatile file paths and code snippets out. A delivery spec creates no umbrella run.
+`spec.md` is the approved delivery-level requirements source authored and content-owned by `recursive-spec`. During Shape, `recursive-delivery-slicing` persists that approved content unchanged while materializing the delivery tree; it does not author, edit, or reinterpret the requirements. The spec keeps the user outcome, requirements and acceptance criteria, testing decisions, pre-agreed seams, constraints and explicit out of scope boundary. Keep volatile file paths and code snippets out. A delivery spec creates no umbrella run.
 
 Use `## Requirements`, `## Testing Decisions`, `## Out of Scope` and `## Constraints`. Each requirement retains observable acceptance criteria; Testing Decisions names the pre-agreed seams.
 

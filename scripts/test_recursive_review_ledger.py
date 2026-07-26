@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import re
 import subprocess
 import tempfile
@@ -96,6 +97,17 @@ class ReviewLedgerFixture:
             comparison="working-tree",
             references=[],
         )))
+        changed_files = [
+            record["path"]
+            for record in surface.capture(
+                self.root,
+                run_id=self.run_id,
+                baseline=baseline,
+                comparison="working-tree",
+                references=[],
+            )["changed"]
+        ]
+        changed_lines = "\n".join(surface.render_markdown_list(changed_files))
         content = f"""Run: `/.recursive/run/{self.run_id}/`
 Phase: `03.5-code-review.md`
 Phase Key: `phase-3-5`
@@ -112,6 +124,19 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 
 ## Bundle Scope
 - immutable test bundle
+
+## Diff Basis
+- Baseline type: `local commit`
+- Baseline reference: `{baseline}`
+- Comparison reference: `working-tree`
+- Normalized baseline: `{baseline}`
+- Normalized comparison: `working-tree`
+- Normalized diff command: `git diff --name-only {baseline}`
+- Tracked diff argv: `["diff","--name-only","-z","{baseline}","--"]`
+- Untracked files argv: `["ls-files","--others","--exclude-standard","-z"]`
+
+## Changed Files Reviewed
+{changed_lines}
 
 {surface_section}
 """
@@ -171,8 +196,13 @@ GeneratedAt: `2026-07-12T00:00:00Z`
     ) -> tuple[str, str]:
         pass_id = f"{pass_number:04d}"
         pass_rel = self.pass_rel(pass_id)
-        _bundle_path, bundle_hash = self.write_bundle(pass_id)
+        bundle_path, bundle_hash = self.write_bundle(pass_id)
         bundle_rel = self.bundle_rel(pass_id)
+        snapshot, snapshot_issues = surface.parse(bundle_path.read_text(encoding="utf-8"))
+        if snapshot is None or snapshot_issues:
+            raise AssertionError(snapshot_issues)
+        changed_items = [record["path"] for record in snapshot["changed"]] or ["none"]
+        changed_lines = "\n".join(f"  - `{path}`" if path != "none" else "  - none" for path in changed_items)
         content = f"""## Review Scope
 
 - Review ID: {self.review_id}
@@ -184,7 +214,7 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 - Artifact Hash: {bundle_hash}
 - Diff Basis: `{bundle_rel}`
 - Changed Files:
-  - `/reviewed.txt`
+{changed_lines}
 - Evidence Basis:
   - `{bundle_rel}`
 
@@ -225,15 +255,23 @@ GeneratedAt: `2026-07-12T00:00:00Z`
         kind: str = "test-gap",
         basis: str = "`/.recursive/RECURSIVE.md` assigns planned suite execution to Phase 4",
     ) -> Path:
-        owner_phase_key = phase_rules.audited_phase_key(owner)
+        owner_phase_key = phase_rules.scheduling_phase_key(owner)
         if owner_phase_key is None:
-            raise ValueError(f"scheduled owner is not audited: {owner}")
+            raise ValueError(f"scheduled owner is not canonical: {owner}")
         dest_rel = f"/.recursive/run/{self.run_id}/evidence/reviews/scheduled/{owner_phase_key}/inventory.md"
         path = self.root / dest_rel.lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
+        record_key = f"{self.review_id}/{finding_id}"
+        owner_path = self.run / owner
         if create_owner:
-            (self.run / owner).write_text(f"# {owner}\n", encoding="utf-8")
+            owner_path.write_text(
+                f"# {owner}\n\n- Consumed Scheduled Handoff: `{record_key}`\n",
+                encoding="utf-8",
+            )
         consumed = "none" if status == "pending" else f"/.recursive/run/{self.run_id}/{owner}"
+        consumption_record = "none" if status == "pending" else record_key
+        evidence_path = "none" if status == "pending" else consumed
+        evidence_hash = "none" if status == "pending" or not owner_path.is_file() else hashlib.sha256(owner_path.read_bytes()).hexdigest()
         controller = "none" if status == "pending" else "controller verified target evidence"
         path.write_text(f"""# Scheduled Finding Handoff Inventory
 
@@ -253,6 +291,9 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 - Scheduling basis: {basis}
 - Status: {status}
 - Consumed in: {consumed if consumed == 'none' else f'`{consumed}`'}
+- Consumption record: {consumption_record}
+- Evidence Path: {evidence_path if evidence_path == 'none' else f'`{evidence_path}`'}
+- Evidence Hash: {evidence_hash}
 - Controller verification: {controller}
 """, encoding="utf-8")
         return path
@@ -261,7 +302,7 @@ GeneratedAt: `2026-07-12T00:00:00Z`
 class RecursiveReviewLedgerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         subprocess.run(["git", "-C", str(self.root), "config", "user.email", "test@example.com"], check=True)
         subprocess.run(["git", "-C", str(self.root), "config", "user.name", "Test"], check=True)
@@ -387,6 +428,126 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
             _document, parse_issues = ledger.parse_document(content)
             self.assertTrue(any("outside its exact field schema" in issue for issue in parse_issues), (residual, parse_issues))
 
+    def test_terminal_finding_freezes_every_field_after_terminalization(self) -> None:
+        (self.root / "tracked-plan.md").write_text("durable destination\n", encoding="utf-8")
+        cases = (
+            ("fixed", "Claimed changes", "`reviewed.txt`", "`silently-rewritten.txt`"),
+            ("rejected", "Disposition rationale", "controller-approved rationale", "silently rewritten authority"),
+            ("scheduled", "Destination", None, "`/.recursive/run/wrong/evidence/reviews/scheduled/phase-4/inventory.md`"),
+            ("deferred", "Human approval", "approved by fixture owner", "approval silently replaced"),
+            ("out-of-scope", "Human decision", "approved by fixture owner", "decision silently replaced"),
+        )
+        for index, (disposition, field, old_value, new_value) in enumerate(cases, start=1):
+            with self.subTest(disposition=disposition, field=field):
+                fixture = ReviewLedgerFixture(self.root, f"terminal-{index}")
+                scheduled = None
+                pending = "none"
+                if disposition == "scheduled":
+                    destination = (
+                        f"/.recursive/run/{fixture.run_id}/evidence/reviews/scheduled/phase-4/inventory.md"
+                    )
+                    scheduled = {
+                        "owner": "04-test-summary.md",
+                        "basis": "`/.recursive/RECURSIVE.md` assigns planned suite execution to Phase 4",
+                        "destination": destination,
+                    }
+                    old_value = f"`{destination}`"
+                    pending = "F-001"
+                terminal = fixture.finding(disposition=disposition, scheduled=scheduled)
+                pass1, hash1 = fixture.render(findings=terminal, pending=pending)
+                (fixture.review / "passes/0001.md").write_text(pass1, encoding="utf-8")
+                mutated = terminal.replace(f"- {field}: {old_value}", f"- {field}: {new_value}")
+                fixture.write_terminal(
+                    pass_number=2,
+                    findings=mutated,
+                    pending=pending,
+                    previous_path=fixture.pass_rel("0001"),
+                    previous_hash=hash1,
+                )
+                issues = ledger.validate_ledger(self.root, fixture.review / "ledger.md").issues
+                self.assertTrue(
+                    any(
+                        "terminal finding reopened or changed" in issue and field in issue
+                        for issue in issues
+                    ),
+                    issues,
+                )
+
+    def test_scope_diff_changed_and_evidence_are_exact_bundle_bindings(self) -> None:
+        changed_fixture = ReviewLedgerFixture(self.root, "scope-changed")
+        changed_path, _digest = changed_fixture.write_terminal()
+        changed_path.write_text(
+            changed_path.read_text(encoding="utf-8").replace("  - `reviewed.txt`", "  - `other.txt`", 1),
+            encoding="utf-8",
+        )
+        changed_issues = ledger.validate_ledger(self.root, changed_path).issues
+        self.assertTrue(any("Changed Files must exactly equal" in issue for issue in changed_issues), changed_issues)
+
+        diff_fixture = ReviewLedgerFixture(self.root, "scope-diff")
+        diff_path, _digest = diff_fixture.write_terminal()
+        diff_path.write_text(
+            diff_path.read_text(encoding="utf-8").replace(
+                f"- Diff Basis: `{diff_fixture.bundle_rel('0001')}`",
+                "- Diff Basis: `git diff --name-only HEAD`",
+            ),
+            encoding="utf-8",
+        )
+        diff_issues = ledger.validate_ledger(self.root, diff_path).issues
+        self.assertTrue(any("Diff Basis must cite the exact immutable" in issue for issue in diff_issues), diff_issues)
+
+        evidence_fixture = ReviewLedgerFixture(self.root, "scope-evidence")
+        evidence_path, _digest = evidence_fixture.write_terminal()
+        evidence_path.write_text(
+            evidence_path.read_text(encoding="utf-8").replace(
+                f"  - `{evidence_fixture.bundle_rel('0001')}`",
+                f"  - `{evidence_fixture.bundle_rel('0001')}`\n  - `reviewed.txt`",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        evidence_issues = ledger.validate_ledger(self.root, evidence_path).issues
+        self.assertTrue(any("Evidence Basis must exactly equal" in issue for issue in evidence_issues), evidence_issues)
+
+        bundle_fixture = ReviewLedgerFixture(self.root, "scope-bundle")
+        bundle_ledger, _digest = bundle_fixture.write_terminal()
+        bundle_path = self.root / bundle_fixture.bundle_rel("0001").lstrip("/")
+        bundle_path.write_text(
+            bundle_path.read_text(encoding="utf-8")
+            .replace(
+                "## Changed Files Reviewed\n",
+                "## Changed Files Reviewed\n- `forged-overlap.txt`\n",
+                1,
+            )
+            .replace(
+                '- Tracked diff argv: `["diff","--name-only","-z","',
+                '- Tracked diff argv: `["diff","--name-only","-z","forged..',
+                1,
+            )
+            .replace(
+                '- Untracked files argv: `["ls-files","--others","--exclude-standard","-z"]`',
+                "- Untracked files argv: none",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        bundle_issues = ledger.validate_ledger(self.root, bundle_ledger).issues
+        self.assertTrue(
+            any("Changed Files Reviewed must exactly equal" in issue for issue in bundle_issues),
+            bundle_issues,
+        )
+        self.assertTrue(
+            any("exact canonical JSON-atom list schema" in issue for issue in bundle_issues),
+            bundle_issues,
+        )
+        self.assertTrue(
+            any("Tracked diff argv must exactly reproduce" in issue for issue in bundle_issues),
+            bundle_issues,
+        )
+        self.assertTrue(
+            any("Untracked files argv must exactly reproduce" in issue for issue in bundle_issues),
+            bundle_issues,
+        )
+
     def test_accepts_working_next_pass_and_historical_artifact_hash(self) -> None:
         finding_open = self.fixture.finding(disposition="open")
         pass1, hash1 = self.fixture.render(findings=finding_open, result="FAIL", open_findings="F-001")
@@ -481,7 +642,7 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
         self.fixture.write_terminal()
         self.fixture.artifact.write_text(self.fixture.artifact.read_text(encoding="utf-8").replace(self.fixture.ledger_rel, "/.recursive/run/demo/../../outside/ledger.md"), encoding="utf-8")
         issues = ledger.validate_phase_artifact(self.root, self.fixture.run, self.fixture.artifact).issues
-        self.assertTrue(any("does not match its run and audited phase" in issue for issue in issues), issues)
+        self.assertTrue(any("Review Ledger Path must be canonical" in issue for issue in issues), issues)
 
         fixture = ReviewLedgerFixture(self.root, "symlink")
         external = self.root / "external-ledger.md"
@@ -491,6 +652,17 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
         result = ledger.validate_ledger(self.root, canonical)
         self.assertTrue(any("canonical" in issue or "control plane" in issue for issue in result.issues))
 
+        fixture = ReviewLedgerFixture(self.root, "hardlink")
+        hardlinked_ledger, _digest = fixture.write_terminal()
+        external_hardlink = self.root.parent / f"{self.root.name}-external-hardlink-ledger.md"
+        external_hardlink.write_bytes(hardlinked_ledger.read_bytes())
+        self.addCleanup(lambda: external_hardlink.unlink(missing_ok=True))
+        hardlinked_ledger.unlink()
+        os.link(external_hardlink, hardlinked_ledger)
+        result = ledger.validate_ledger(self.root, hardlinked_ledger)
+        self.assertTrue(any("canonical in-repository regular non-symlink" in issue for issue in result.issues))
+        hardlinked_ledger.unlink()
+
         fixture = ReviewLedgerFixture(self.root, "skipped-owner")
         destination = f"/.recursive/run/skipped-owner/evidence/reviews/scheduled/04-test-summary/{fixture.review_id}-inventory.md"
         # Destination is deliberately invalid and no physical handoff exists.
@@ -498,7 +670,63 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
         fixture.write_terminal(findings=fixture.finding(disposition="scheduled", kind="test-gap", scheduled=scheduled), pending="F-001")
         issues = ledger.validate_phase_artifact(self.root, fixture.run, fixture.artifact).issues
         self.assertTrue(any("scheduled Destination must be" in issue for issue in issues), issues)
-        self.assertTrue(any("scheduled handoff does not exist" in issue for issue in issues), issues)
+
+    def test_external_invalid_utf8_ledger_and_handoff_paths_short_circuit_without_read(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-invalid-ledger.md"
+        outside.write_bytes(b"\xff\xfe\xfa")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+
+        direct = ledger.validate_ledger(self.root, outside)
+        self.assertFalse(direct.valid)
+        self.assertTrue(any("canonical in-repository" in issue for issue in direct.issues), direct.issues)
+
+        invalid_internal = ReviewLedgerFixture(self.root, "invalid-utf8-ledger")
+        invalid_internal_path = invalid_internal.review / "ledger.md"
+        invalid_internal_path.write_bytes(b"\xff\xfe\xfa")
+        decoded = ledger.validate_ledger(self.root, invalid_internal_path)
+        self.assertFalse(decoded.valid)
+        self.assertTrue(any("readable UTF-8" in issue for issue in decoded.issues), decoded.issues)
+
+        destination = "/.recursive/run/demo/evidence/reviews/scheduled/phase-4/inventory.md"
+        scheduled = {
+            "owner": "04-test-summary.md",
+            "basis": "`/.recursive/RECURSIVE.md` assigns planned suite execution to Phase 4",
+            "destination": destination,
+        }
+        finding = self.fixture.finding(disposition="scheduled", kind="test-gap", scheduled=scheduled)
+        self.fixture.write_terminal(findings=finding, pending="F-001")
+        handoff = self.fixture.write_handoff("F-001", status="pending")
+        external_relative = os.path.relpath(outside, self.root).replace("\\", "/")
+        handoff.write_text(
+            handoff.read_text(encoding="utf-8").replace(
+                f"- Source Ledger: `{self.fixture.ledger_rel}`",
+                f"- Source Ledger: `{external_relative}`",
+            ),
+            encoding="utf-8",
+        )
+        source_result = ledger.validate_scheduled_handoffs(self.root, self.fixture.run)
+        self.assertFalse(source_result.valid)
+        self.assertTrue(
+            any("Source Ledger must be a canonical repository path" in issue for issue in source_result.issues),
+            source_result.issues,
+        )
+
+        ledger_path = self.fixture.review / "ledger.md"
+        snapshot_path = self.fixture.review / "passes/0001.md"
+        for path in (ledger_path, snapshot_path):
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    f"- Destination: `{destination}`",
+                    f"- Destination: `{external_relative}`",
+                ),
+                encoding="utf-8",
+            )
+        destination_result = ledger.validate_ledger(self.root, ledger_path)
+        self.assertFalse(destination_result.valid)
+        self.assertTrue(
+            any("scheduled Destination must be" in issue for issue in destination_result.issues),
+            destination_result.issues,
+        )
 
     def test_scheduled_handoff_is_run_only_physical_and_consumed_at_target(self) -> None:
         old_fixture = ReviewLedgerFixture(self.root, "old-owner-stem")
@@ -538,10 +766,73 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
         result = ledger.validate_ledger(self.root, standalone_ledger)
         self.assertTrue(any("standalone" in issue.lower() and "scheduled" in issue.lower() for issue in result.issues))
 
+    def test_consumed_handoff_requires_owner_backreference_and_hashed_evidence(self) -> None:
+        destination = "/.recursive/run/demo/evidence/reviews/scheduled/phase-4/inventory.md"
+        scheduled = {
+            "owner": "04-test-summary.md",
+            "basis": "`/.recursive/RECURSIVE.md` assigns planned suite execution to Phase 4",
+            "destination": destination,
+        }
+        finding = self.fixture.finding(disposition="scheduled", kind="test-gap", scheduled=scheduled)
+        self.fixture.write_terminal(findings=finding, pending="F-001")
+        handoff = self.fixture.write_handoff("F-001", status="consumed")
+        self.assertTrue(ledger.validate_scheduled_handoffs(self.root, self.fixture.run).valid)
+
+        owner = self.fixture.run / "04-test-summary.md"
+        owner.write_text("# owner without handoff backreference\n", encoding="utf-8")
+        missing_backref = ledger.validate_scheduled_handoffs(self.root, self.fixture.run)
+        self.assertTrue(any("exact handoff backreference" in issue for issue in missing_backref.issues), missing_backref.issues)
+        active, _issues = ledger.get_active_scheduled_owner_phases(self.root, self.fixture.run)
+        self.assertEqual(active, {"04-test-summary.md"})
+
+        self.fixture.write_handoff("F-001", status="consumed")
+        outside_proof = self.root.parent / f"{self.root.name}-outside-consumption-proof.md"
+        outside_proof.write_text("real proof outside repository\n", encoding="utf-8")
+        self.addCleanup(lambda: outside_proof.unlink(missing_ok=True))
+        escaped_value = os.path.relpath(outside_proof, self.root).replace("\\", "/")
+        self.assertIn("..", Path(escaped_value).parts)
+        handoff.write_text(
+            handoff.read_text(encoding="utf-8").replace(
+                f"- Evidence Path: `/.recursive/run/{self.fixture.run_id}/04-test-summary.md`",
+                f"- Evidence Path: `{escaped_value}`",
+            ),
+            encoding="utf-8",
+        )
+        escaped = ledger.validate_scheduled_handoffs(self.root, self.fixture.run)
+        self.assertTrue(
+            any("canonical repository address without path escape" in issue for issue in escaped.issues),
+            escaped.issues,
+        )
+
+        self.fixture.write_handoff("F-001", status="consumed")
+        handoff.write_text(
+            handoff.read_text(encoding="utf-8").replace(
+                re.search(r"(?m)^- Evidence Hash: ([a-f0-9]{64})$", handoff.read_text(encoding="utf-8")).group(1),
+                "0" * 64,
+                1,
+            ),
+            encoding="utf-8",
+        )
+        bad_hash = ledger.validate_scheduled_handoffs(self.root, self.fixture.run)
+        self.assertTrue(any("Evidence Hash does not match" in issue for issue in bad_hash.issues), bad_hash.issues)
+
+        self.fixture.write_handoff("F-001", status="consumed")
+        handoff.write_text(
+            handoff.read_text(encoding="utf-8").replace(
+                "- Owner phase: 04-test-summary.md",
+                "- Owner phase: 00-requirements.md",
+            ),
+            encoding="utf-8",
+        )
+        active, active_issues = ledger.get_active_scheduled_owner_phases(self.root, self.fixture.run)
+        self.assertEqual(active, {"04-test-summary.md"})
+        self.assertNotIn("00-requirements.md", active)
+        self.assertTrue(any("Owner phase does not match source finding" in issue for issue in active_issues), active_issues)
+
     def test_pending_handoff_activates_absent_optional_owner_without_precreation(self) -> None:
         fixture = ReviewLedgerFixture(self.root, "active-optional-owner")
         owner = "04-test-summary.md"
-        owner_phase_key = phase_rules.audited_phase_key(owner)
+        owner_phase_key = phase_rules.scheduling_phase_key(owner)
         self.assertIsNotNone(owner_phase_key)
         destination = f"/.recursive/run/{fixture.run_id}/evidence/reviews/scheduled/{owner_phase_key}/inventory.md"
         scheduled = {"owner": owner, "basis": "`/.recursive/RECURSIVE.md` assigns planned suite execution to Phase 4", "destination": destination}
@@ -577,7 +868,7 @@ class RecursiveReviewLedgerTest(unittest.TestCase):
         valid_handoff = handoff.read_text(encoding="utf-8")
         handoff.write_text(valid_handoff.replace("# Scheduled Finding Handoff Inventory\n", "# Scheduled Finding Handoff Inventory\nmalformed prose\n"), encoding="utf-8")
         active, active_issues = ledger.get_active_scheduled_owner_phases(self.root, fixture.run)
-        self.assertEqual(active, set())
+        self.assertEqual(active, {owner})
         self.assertTrue(any("outside record schema" in issue for issue in active_issues), active_issues)
         blocked_status = subprocess.run(
             [sys.executable, str(RUNTIME / "recursive-status.py"), "--repo-root", str(self.root), "--run-id", fixture.run_id],

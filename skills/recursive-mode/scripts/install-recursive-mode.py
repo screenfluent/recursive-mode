@@ -514,7 +514,7 @@ It exists to reduce blind doc-by-doc scanning. It is not a second workflow spec.
   - `/.recursive/memory/skills/SKILLS.md`
   - `/.recursive/config/recursive-router.json`
   - `/.recursive/config/recursive-router-discovered.json`
-  - the installed `recursive-router`, `recursive-subagent`, and `recursive-review-bundle` skills
+  - the installed `recursive-router`, `recursive-subagent`, `recursive-review`, and `recursive-review-bundle` skills
 - Working on memory behavior:
   - `/.recursive/memory/MEMORY.md`
   - the installed `recursive-training` skill

@@ -8,11 +8,13 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
+import importlib
 import json
 import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -26,6 +28,26 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+RECURSIVE_RUNTIME_DIR = Path(__file__).resolve().parent.parent / "skills" / "recursive-mode" / "scripts"
+
+
+def load_recursive_runtime_contracts():
+    runtime_path = str(RECURSIVE_RUNTIME_DIR)
+    inserted = runtime_path not in sys.path
+    if inserted:
+        sys.path.insert(0, runtime_path)
+    try:
+        phase_contract = importlib.import_module("recursive_phase_rules")
+        action_contract = importlib.import_module("recursive_review_action")
+    finally:
+        if inserted:
+            sys.path.remove(runtime_path)
+    return phase_contract, action_contract
+
+
+recursive_phase_contract, recursive_action_contract = load_recursive_runtime_contracts()
 
 
 DEFAULT_SCENARIO = "local-first-planner"
@@ -99,6 +121,7 @@ RECURSIVE_EVALUATION_ISSUE_PREFIXES = (
     "Recursive Phase 1/2 guardrails missing or outdated: ",
     "Recursive worktree doc does not record a parsable worktree location.",
     "Recursive worktree doc points to a worktree path that does not exist.",
+    "Recursive router policy invalid: ",
     "Recursive routed delegation evidence missing: ",
 )
 RECURSIVE_CONTROLLER_SYNTHESIS_MARKERS = (
@@ -215,6 +238,19 @@ class RecursiveStageRouteSpec:
     next_artifact_name: str | None = None
     distinct_cli_candidate: bool = False
     deadline_if_distinct_missing: bool = False
+
+
+class RoutedRoleBindings(dict[str, tuple[str, str]]):
+    """Configured external routes plus a structured policy-read diagnostic."""
+
+    def __init__(
+        self,
+        values: dict[str, tuple[str, str]] | None = None,
+        *,
+        error: str = "",
+    ) -> None:
+        super().__init__(values or {})
+        self.error = error
 
 
 @dataclass
@@ -446,6 +482,7 @@ class BenchmarkHarness:
         self.cargo_exe = shutil.which("cargo")
         self.rustup_exe = shutil.which("rustup")
         self.trunk_exe = shutil.which("trunk")
+        self.provision_dependencies = getattr(args, "provision_dependencies", True)
         self.runner_configs = self._build_runner_configs()
         self.kimi_config_path = Path.home() / ".kimi" / "config.toml"
         self._progress_lock = threading.Lock()
@@ -732,6 +769,29 @@ class BenchmarkHarness:
             result.log_paths["trunk_download"] = self.rel(log_path)
             result.phase_durations["trunk_download"] = round(duration, 2)
             return False
+
+    def provision_scenario_dependencies(self, repo_root: Path, logs_root: Path, result: ArmResult) -> None:
+        if not self.provision_dependencies:
+            return
+        if self.uses_rust_wasm_toolchain():
+            self.prepare_rust_wasm_toolchain(logs_root, result)
+            return
+        if self.args.skip_npm_install:
+            return
+        install_result = self.run_command(
+            [self.npm_exe, "install"],
+            cwd=repo_root,
+            timeout_seconds=self.command_timeout,
+            check=False,
+        )
+        self.write_command_log(logs_root / "npm-install.log", "npm install", install_result)
+        result.log_paths["npm_install"] = self.rel(logs_root / "npm-install.log")
+        result.phase_durations["npm_install"] = round(install_result.duration_seconds, 2)
+        if install_result.returncode != 0 or install_result.timed_out:
+            raise BenchmarkError(
+                f"Failed to prepare benchmark dependencies for {result.runner_name} {result.arm_name}."
+            )
+        self.write_arm_progress(result, "dependencies-installed", detail="npm install completed.")
 
     def resolve_trunk_asset_name(self) -> str:
         machine = os.environ.get("PROCESSOR_ARCHITECTURE", "").lower()
@@ -1726,23 +1786,7 @@ class BenchmarkHarness:
 
         self.git_init(repo_root)
 
-        if self.uses_rust_wasm_toolchain():
-            self.prepare_rust_wasm_toolchain(logs_root, result)
-        elif not self.args.skip_npm_install:
-            install_result = self.run_command(
-                [self.npm_exe, "install"],
-                cwd=repo_root,
-                timeout_seconds=self.command_timeout,
-                check=False,
-            )
-            self.write_command_log(logs_root / "npm-install.log", "npm install", install_result)
-            result.log_paths["npm_install"] = self.rel(logs_root / "npm-install.log")
-            result.phase_durations["npm_install"] = round(install_result.duration_seconds, 2)
-            if install_result.returncode != 0 or install_result.timed_out:
-                raise BenchmarkError(
-                    f"Failed to prepare benchmark dependencies for {runner.display_name} {result.arm_name}."
-            )
-            self.write_arm_progress(result, "dependencies-installed", detail="npm install completed.")
+        self.provision_scenario_dependencies(repo_root, logs_root, result)
 
         if recursive_on:
             seeded_skill_docs: list[str] = []
@@ -1896,57 +1940,199 @@ class BenchmarkHarness:
         return head
 
     @staticmethod
-    def has_configured_recursive_router_policy(policy_path: Path) -> bool:
-        if not policy_path.exists():
-            return False
+    def read_safe_router_json(path: Path) -> tuple[str, dict[str, object]] | None:
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
         try:
-            payload = json.loads(policy_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
+            before = path.lstat()
+            if (
+                path.is_symlink()
+                or (
+                    reparse_flag
+                    and getattr(before, "st_file_attributes", 0) & reparse_flag
+                )
+                or not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+            ):
+                return None
+            text = path.read_text(encoding="utf-8")
+            after = path.lstat()
+        except (OSError, UnicodeError):
+            return None
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or after.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
         if not isinstance(payload, dict):
+            return None
+        return text, payload
+
+    @staticmethod
+    def router_policy_payload_is_well_formed(payload: dict[str, object]) -> bool:
+        role_routes = payload.get("role_routes")
+        cli_overrides = payload.get("cli_overrides")
+        if not isinstance(role_routes, dict) or not isinstance(cli_overrides, dict):
+            return False
+        for role_name, route in role_routes.items():
+            if not isinstance(role_name, str) or not role_name.strip() or not isinstance(route, dict):
+                return False
+            enabled = route.get("enabled")
+            mode = route.get("mode")
+            cli = route.get("cli")
+            model = route.get("model")
+            if (
+                type(enabled) is not bool
+                or mode not in {"external-cli", "local-only"}
+                or (cli is not None and not isinstance(cli, str))
+                or (model is not None and not isinstance(model, str))
+                or (isinstance(cli, str) and not cli.strip())
+                or (isinstance(model, str) and not model.strip())
+            ):
+                return False
+        return not any(
+            not isinstance(cli_name, str)
+            or not cli_name.strip()
+            or not isinstance(override, dict)
+            for cli_name, override in cli_overrides.items()
+        )
+
+    @staticmethod
+    def has_configured_recursive_router_policy(policy_path: Path) -> bool:
+        loaded = BenchmarkHarness.read_safe_router_json(policy_path)
+        if loaded is None:
+            return False
+        _text, payload = loaded
+        if not BenchmarkHarness.router_policy_payload_is_well_formed(payload):
             return False
         role_routes = payload.get("role_routes")
-        if isinstance(role_routes, dict):
-            for route in role_routes.values():
-                if not isinstance(route, dict):
-                    continue
-                if route.get("enabled") is False:
-                    continue
-                if route.get("cli") and route.get("model"):
-                    return True
+        assert isinstance(role_routes, dict)
+        configured_route = False
+        for route in role_routes.values():
+            assert isinstance(route, dict)
+            enabled = route.get("enabled")
+            mode = route.get("mode")
+            cli = route.get("cli")
+            model = route.get("model")
+            if (
+                enabled is True
+                and mode == "external-cli"
+                and isinstance(cli, str)
+                and bool(cli.strip())
+                and isinstance(model, str)
+                and bool(model.strip())
+            ):
+                configured_route = True
         cli_overrides = payload.get("cli_overrides")
-        return isinstance(cli_overrides, dict) and bool(cli_overrides)
+        assert isinstance(cli_overrides, dict)
+        return configured_route or bool(cli_overrides)
 
     @staticmethod
     def has_configured_recursive_routed_roles(policy_path: Path) -> bool:
         return bool(BenchmarkHarness.configured_recursive_routed_role_bindings(policy_path))
 
     @staticmethod
-    def configured_recursive_routed_role_bindings(policy_path: Path) -> dict[str, tuple[str, str]]:
-        if not policy_path.exists():
-            return {}
+    def configured_recursive_routed_role_bindings(policy_path: Path) -> RoutedRoleBindings:
         try:
-            payload = json.loads(policy_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+            policy_metadata = policy_path.lstat()
+        except FileNotFoundError:
+            return RoutedRoleBindings()
+        except OSError as exc:
+            return RoutedRoleBindings(error=f"could not inspect canonical router policy: {exc}")
+
+        if not policy_path.is_absolute() or len(policy_path.parents) < 3:
+            return RoutedRoleBindings(error="router policy path is not an absolute canonical repository path")
+        repo_root = policy_path.parents[2]
+        expected_policy_path = repo_root / ".recursive" / "config" / "recursive-router.json"
+        if policy_path != expected_policy_path:
+            return RoutedRoleBindings(error="router policy is not at .recursive/config/recursive-router.json")
+        canonical_policy_path = BenchmarkHarness.canonical_confined_regular_file(
+            repo_root,
+            repo_root / ".recursive" / "config",
+            "/.recursive/config/recursive-router.json",
+        )
+        if canonical_policy_path is None or canonical_policy_path != policy_path:
+            return RoutedRoleBindings(
+                error="router policy must be a confined, non-linked, unique regular file"
+            )
+        if not stat.S_ISREG(policy_metadata.st_mode) or policy_metadata.st_nlink != 1:
+            return RoutedRoleBindings(
+                error="router policy must be a confined, non-linked, unique regular file"
+            )
+
+        try:
+            policy_text = canonical_policy_path.read_text(encoding="utf-8")
+        except UnicodeError:
+            return RoutedRoleBindings(error="router policy is not valid UTF-8")
+        except OSError as exc:
+            return RoutedRoleBindings(error=f"could not read canonical router policy: {exc}")
+        try:
+            payload = json.loads(policy_text)
+        except json.JSONDecodeError as exc:
+            return RoutedRoleBindings(error=f"router policy is not valid JSON: {exc.msg}")
         if not isinstance(payload, dict):
-            return {}
+            return RoutedRoleBindings(error="router policy root must be a JSON object")
         role_routes = payload.get("role_routes")
+        if role_routes is None:
+            return RoutedRoleBindings(error="router policy is missing role_routes")
         if not isinstance(role_routes, dict):
-            return {}
+            return RoutedRoleBindings(error="router policy role_routes must be a JSON object")
         bindings: dict[str, tuple[str, str]] = {}
         for role_name, route in role_routes.items():
+            if not isinstance(role_name, str) or not role_name.strip():
+                return RoutedRoleBindings(error="router policy role names must be non-empty strings")
             if not isinstance(route, dict):
+                return RoutedRoleBindings(
+                    error=f"router policy role_routes.{role_name} must be a JSON object"
+                )
+            enabled = route.get("enabled")
+            mode = route.get("mode")
+            cli = route.get("cli")
+            model = route.get("model")
+            if type(enabled) is not bool:
+                return RoutedRoleBindings(
+                    error=f"router policy role_routes.{role_name}.enabled must be a boolean"
+                )
+            if not isinstance(mode, str) or mode not in {"external-cli", "local-only"}:
+                return RoutedRoleBindings(
+                    error=(
+                        f"router policy role_routes.{role_name}.mode must be "
+                        "external-cli or local-only"
+                    )
+                )
+            if cli is not None and not isinstance(cli, str):
+                return RoutedRoleBindings(
+                    error=f"router policy role_routes.{role_name}.cli must be a string or null"
+                )
+            if model is not None and not isinstance(model, str):
+                return RoutedRoleBindings(
+                    error=f"router policy role_routes.{role_name}.model must be a string or null"
+                )
+            if isinstance(cli, str) and not cli.strip():
+                return RoutedRoleBindings(
+                    error=f"router policy role_routes.{role_name}.cli must not be empty"
+                )
+            if isinstance(model, str) and not model.strip():
+                return RoutedRoleBindings(
+                    error=f"router policy role_routes.{role_name}.model must not be empty"
+                )
+            if enabled is not True or mode != "external-cli":
                 continue
-            if route.get("enabled") is False:
+            if cli is None or model is None:
                 continue
-            if route.get("mode") == "local-only":
-                continue
-            cli = str(route.get("cli") or "").strip()
-            model = str(route.get("model") or "").strip()
-            if cli and model:
-                bindings[str(role_name)] = (cli, model)
-        return bindings
+            normalized_role = role_name.strip().lower()
+            normalized_cli = cli.strip()
+            normalized_model = model.strip()
+            if normalized_role in bindings:
+                return RoutedRoleBindings(
+                    error=f"router policy contains duplicate normalized role {normalized_role}"
+                )
+            bindings[normalized_role] = (normalized_cli, normalized_model)
+        return RoutedRoleBindings(bindings)
 
     @staticmethod
     def recursive_stage_route_entries(
@@ -2090,7 +2276,7 @@ class BenchmarkHarness:
             if BenchmarkHarness.has_configured_recursive_router_policy(source_config_root / policy_name):
                 return True
         for file_name in ("recursive-router-discovered.json", "recursive-router-cli-discovered.json"):
-            if (source_config_root / file_name).exists():
+            if BenchmarkHarness.read_safe_router_json(source_config_root / file_name) is not None:
                 return True
         return False
 
@@ -2105,11 +2291,29 @@ class BenchmarkHarness:
             ("recursive-router-cli-discovered.json", "recursive-router-cli-discovered.json"),
         ):
             source_path = source_config_root / source_name
-            if not source_path.exists():
+            loaded_source = BenchmarkHarness.read_safe_router_json(source_path)
+            if loaded_source is None:
                 continue
             target_path = target_config_root / target_name
-            source_text = source_path.read_text(encoding="utf-8", errors="replace")
-            target_text = target_path.read_text(encoding="utf-8", errors="replace") if target_path.exists() else None
+            source_text, source_payload = loaded_source
+            if (
+                source_name in {"recursive-router.json", "recursive-router-cli.json"}
+                and not BenchmarkHarness.router_policy_payload_is_well_formed(source_payload)
+            ):
+                continue
+            try:
+                target_exists = target_path.lstat() is not None
+            except FileNotFoundError:
+                target_exists = False
+            except OSError:
+                continue
+            if target_exists:
+                loaded_target = BenchmarkHarness.read_safe_router_json(target_path)
+                if loaded_target is None:
+                    continue
+                target_text, _target_payload = loaded_target
+            else:
+                target_text = None
             if source_text == target_text:
                 continue
             write_text(target_path, source_text)
@@ -2207,40 +2411,402 @@ class BenchmarkHarness:
         return copied
 
     @staticmethod
-    def action_record_uses_routed_cli(content: str) -> bool:
-        return BenchmarkHarness.routed_action_record_binding(content) is not None
+    def canonical_action_field(content: str, section_name: str, field_name: str) -> str | None:
+        body = recursive_action_contract.section(content, section_name)
+        values = recursive_action_contract.field_values(body, field_name)
+        return values[0] if len(values) == 1 else None
 
     @staticmethod
-    def routed_action_record_binding(content: str) -> tuple[str, str] | None:
-        routed_cli_match = re.search(r"(?m)^- Routed CLI:\s*`([^`]+)`", content)
-        routed_model_match = re.search(r"(?m)^- Routed Model:\s*`([^`]+)`", content)
-        if routed_cli_match is None or routed_model_match is None:
+    def canonical_action_field_paths(content: str, section_name: str, field_name: str) -> list[str] | None:
+        body = recursive_action_contract.section(content, section_name)
+        matches = list(re.finditer(rf"(?m)^- {re.escape(field_name)}:\s*$", body))
+        if len(matches) != 1:
             return None
-        routed_cli = routed_cli_match.group(1).strip().lower()
-        routed_model = routed_model_match.group(1).strip().lower()
-        if routed_cli in {"", "none"} or routed_model in {"", "none"}:
+        values: list[str] = []
+        for line in body[matches[0].end() :].splitlines():
+            if not line.strip():
+                if values:
+                    break
+                continue
+            if not line.startswith("  - "):
+                break
+            values.append(recursive_action_contract.review_ledger.trim_value(line[4:]))
+        return values or None
+
+    @staticmethod
+    def canonical_action_subsection_paths(
+        content: str,
+        section_name: str,
+        subsection_name: str,
+    ) -> list[str] | None:
+        body = recursive_action_contract.section(content, section_name)
+        matches = list(re.finditer(rf"(?m)^### {re.escape(subsection_name)}\s*$", body))
+        if len(matches) != 1:
             return None
-        return routed_cli, routed_model
+        values: list[str] = []
+        for line in body[matches[0].end() :].splitlines():
+            if not line.strip():
+                if values:
+                    break
+                continue
+            if not line.startswith("- "):
+                break
+            values.append(recursive_action_contract.review_ledger.trim_value(line[2:]))
+        return values or None
+
+    @staticmethod
+    def canonical_confined_regular_file(
+        repo_root: Path,
+        confinement_root: Path,
+        display_path: str,
+    ) -> Path | None:
+        if (
+            not display_path.startswith("/")
+            or "\\" in display_path
+            or display_path.endswith("/")
+        ):
+            return None
+        relative_parts = display_path[1:].split("/")
+        if not relative_parts or any(part in {"", ".", ".."} for part in relative_parts):
+            return None
+        candidate = repo_root.joinpath(*relative_parts)
+        try:
+            candidate.relative_to(confinement_root)
+        except ValueError:
+            return None
+        canonical_display = "/" + candidate.relative_to(repo_root).as_posix()
+        if display_path != canonical_display:
+            return None
+
+        try:
+            resolved_confinement = confinement_root.resolve(strict=True)
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(resolved_confinement)
+            relative_candidate = candidate.relative_to(repo_root)
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+        current = repo_root
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        try:
+            for part in relative_candidate.parts:
+                current = current / part
+                metadata = current.lstat()
+                if current.is_symlink() or (
+                    reparse_flag
+                    and getattr(metadata, "st_file_attributes", 0) & reparse_flag
+                ):
+                    return None
+            candidate_metadata = candidate.lstat()
+            if (
+                not stat.S_ISREG(candidate_metadata.st_mode)
+                or candidate_metadata.st_nlink != 1
+            ):
+                return None
+        except OSError:
+            return None
+        return candidate
+
+    def routed_action_in_repo_evidence_matches(
+        self,
+        repo_root: Path,
+        run_root: Path,
+        action_record: Path,
+        content: str,
+        routed_role: str,
+        routed_cli: str,
+        routed_model: str,
+    ) -> bool:
+        action_display = self.canonical_action_field(content, "Metadata", "Action Record Path")
+        routing_config_display = self.canonical_action_field(
+            content,
+            "Routing",
+            "Routing Config Path",
+        )
+        routing_discovery_display = self.canonical_action_field(
+            content,
+            "Routing",
+            "Routing Discovery Path",
+        )
+        expected_action_display = (
+            f"/.recursive/run/{run_root.name}/subagents/{action_record.name}"
+        )
+        prompt_display = self.canonical_action_field(content, "Routing", "Prompt Bundle Path")
+        capture_displays = self.canonical_action_field_paths(content, "Routing", "Output Capture Paths")
+        evidence_displays = self.canonical_action_subsection_paths(
+            content,
+            "Claimed Artifact Impact",
+            "Evidence Used",
+        )
+        if (
+            not action_display
+            or action_display != expected_action_display
+            or routing_config_display != "/.recursive/config/recursive-router.json"
+            or routing_discovery_display
+            != "/.recursive/config/recursive-router-discovered.json"
+            or not prompt_display
+            or prompt_display.strip().lower() == "none"
+            or not capture_displays
+            or not evidence_displays
+            or len(set(evidence_displays)) != len(evidence_displays)
+            or any(value.strip().lower() == "none" for value in (*capture_displays, *evidence_displays))
+        ):
+            return False
+
+        prompt_path = self.canonical_confined_regular_file(
+            repo_root,
+            run_root / "router-prompts",
+            prompt_display,
+        )
+        if prompt_path is None:
+            return False
+        try:
+            if not prompt_path.read_text(encoding="utf-8").strip():
+                return False
+        except (OSError, UnicodeError):
+            return False
+
+        capture_paths: dict[str, Path] = {}
+        for display_path in capture_displays:
+            capture_path = self.canonical_confined_regular_file(
+                repo_root,
+                run_root / "evidence" / "router",
+                display_path,
+            )
+            if capture_path is None or display_path in capture_paths:
+                return False
+            capture_paths[display_path] = capture_path
+        if not set(capture_paths).issubset(set(evidence_displays)):
+            return False
+
+        receipt_candidates: list[tuple[str, Path, dict[str, object]]] = []
+        for display_path, capture_path in capture_paths.items():
+            if capture_path.suffix.lower() != ".json":
+                continue
+            try:
+                payload = json.loads(capture_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                receipt_candidates.append((display_path, capture_path, payload))
+        if len(receipt_candidates) != 1:
+            return False
+
+        receipt_display, _receipt_path, receipt = receipt_candidates[0]
+        decision = receipt.get("decision")
+        if not isinstance(decision, dict):
+            return False
+        typed_route_fields = (
+            receipt.get("role"),
+            receipt.get("cli"),
+            receipt.get("model"),
+            decision.get("role"),
+            decision.get("cli"),
+            decision.get("model"),
+            decision.get("config_path"),
+            decision.get("discovery_path"),
+        )
+        if not all(isinstance(value, str) for value in typed_route_fields):
+            return False
+        receipt_role = receipt["role"].strip().lower()
+        receipt_cli = receipt["cli"].strip().lower()
+        receipt_model = receipt["model"].strip().lower()
+        decision_role = decision["role"].strip().lower()
+        decision_cli = decision["cli"].strip().lower()
+        decision_model = decision["model"].strip().lower()
+        if (
+            receipt.get("success") is not True
+            or type(receipt.get("exit_code")) is not int
+            or receipt["exit_code"] != 0
+            or receipt.get("prompt_source") != "file"
+            or not isinstance(receipt.get("prompt_bundle_path"), str)
+            or (
+                "/"
+                + str(receipt["prompt_bundle_path"]).replace("\\", "/").strip().lstrip("/")
+            )
+            != prompt_display
+            or decision.get("decision") != "external-cli"
+            or decision["config_path"] != routing_config_display.lstrip("/")
+            or decision["discovery_path"] != routing_discovery_display.lstrip("/")
+            or (receipt_role, receipt_cli, receipt_model)
+            != (routed_role, routed_cli, routed_model)
+            or (decision_role, decision_cli, decision_model)
+            != (routed_role, routed_cli, routed_model)
+        ):
+            return False
+
+        output_text = receipt.get("output_text")
+        if not isinstance(output_text, str) or not output_text.strip():
+            return False
+        expected_output = output_text.rstrip() + "\n"
+        matching_outputs: list[str] = []
+        for display_path, capture_path in capture_paths.items():
+            if display_path == receipt_display:
+                continue
+            try:
+                if capture_path.read_bytes() == expected_output.encode("utf-8"):
+                    matching_outputs.append(display_path)
+            except (OSError, UnicodeError):
+                continue
+        return len(matching_outputs) == 1 and matching_outputs[0] in evidence_displays
+
+    def routed_action_record_binding(
+        self,
+        repo_root: Path,
+        run_root: Path,
+        action_record: Path,
+        content: str,
+        routed_role_bindings: dict[str, tuple[str, str]],
+    ) -> tuple[str, str, str] | None:
+        path_validation = recursive_action_contract.validate_action_record_path(
+            repo_root,
+            run_root,
+            action_record,
+        )
+        if not path_validation.valid or path_validation.path is None:
+            return None
+
+        run_id = run_root.name
+        phase_label = self.canonical_action_field(content, "Metadata", "Phase")
+        routed_role = self.canonical_action_field(content, "Routing", "Routed Role")
+        routed_cli = self.canonical_action_field(content, "Routing", "Routed CLI")
+        routed_model = self.canonical_action_field(content, "Routing", "Routed Model")
+        router_used = self.canonical_action_field(content, "Routing", "Router Used")
+        routing_config = self.canonical_action_field(content, "Routing", "Routing Config Path")
+        invocation_exit_code = self.canonical_action_field(content, "Routing", "Invocation Exit Code")
+        if not all((phase_label, routed_role, routed_cli, routed_model, router_used)):
+            return None
+        assert phase_label is not None
+        assert routed_role is not None
+        assert routed_cli is not None
+        assert routed_model is not None
+        assert router_used is not None
+        normalized_role = routed_role.strip().lower()
+        normalized_cli = routed_cli.strip().lower()
+        normalized_model = routed_model.strip().lower()
+        if (
+            any(value in {"", "none"} for value in (normalized_role, normalized_cli, normalized_model))
+            or router_used.strip().lower() != "recursive-router"
+        ):
+            return None
+        configured_binding = routed_role_bindings.get(normalized_role)
+        if configured_binding is None:
+            return None
+        configured_cli, configured_model = (value.strip().lower() for value in configured_binding)
+        if (normalized_cli, normalized_model) != (configured_cli, configured_model):
+            return None
+        if routing_config != "/.recursive/config/recursive-router.json" or invocation_exit_code != "0":
+            return None
+
+        route_spec = next((spec for spec in RECURSIVE_STAGE_ROUTE_SPECS if spec.role_name == normalized_role), None)
+        if route_spec is None:
+            return None
+        owning_artifact = run_root / route_spec.artifact_name
+        if phase_label != route_spec.phase_label or not owning_artifact.is_file():
+            return None
+
+        full_validation = recursive_action_contract.validate_action_record(
+            repo_root,
+            content,
+            expected_run=run_id,
+            expected_phase=phase_label,
+            owning_artifact=route_spec.artifact_name,
+        )
+        if not full_validation.valid:
+            return None
+
+        if not self.routed_action_in_repo_evidence_matches(
+            repo_root,
+            run_root,
+            path_validation.path,
+            content,
+            normalized_role,
+            normalized_cli,
+            normalized_model,
+        ):
+            return None
+
+        ledger_path = self.canonical_action_field(content, "Claimed Findings", "Review Ledger")
+        bundle_path = self.canonical_action_field(content, "Claimed Findings", "Review Bundle")
+        review_pass = self.canonical_action_field(content, "Claimed Findings", "Review Pass")
+        structured_tokens = recursive_action_contract.execution_mode_tokens(content)
+        requires_review_binding = bool(
+            structured_tokens & recursive_action_contract.STRUCTURED_EXECUTION_TOKENS
+            or ledger_path
+            or bundle_path
+            or review_pass
+        )
+        if requires_review_binding:
+            artifact_content = owning_artifact.read_text(encoding="utf-8")
+            current_ledger = self.canonical_action_field(
+                artifact_content,
+                "Review Metadata",
+                "Review Ledger Path",
+            )
+            current_bundle = self.canonical_action_field(
+                artifact_content,
+                "Review Metadata",
+                "Review Bundle Path",
+            )
+            current_pass = (
+                recursive_action_contract.review_pass_from_bundle_path(current_bundle or "")
+            )
+            if not current_ledger or not current_bundle or not current_pass:
+                return None
+            current_validation = recursive_action_contract.validate_action_record(
+                repo_root,
+                content,
+                expected_run=run_id,
+                expected_phase=phase_label,
+                owning_artifact=route_spec.artifact_name,
+                expected_review_bundle=current_bundle,
+                expected_review_ledger=current_ledger,
+                expected_review_pass=current_pass,
+            )
+            if not current_validation.valid:
+                return None
+        return normalized_role, normalized_cli, normalized_model
 
     def evaluate_routed_recursive_evidence(self, repo_root: Path, run_root: Path, result: ArmResult) -> None:
         policy_path = repo_root / ".recursive" / "config" / "recursive-router.json"
         routed_role_bindings = self.configured_recursive_routed_role_bindings(policy_path)
+        if routed_role_bindings.error:
+            result.recursive_workflow_status = "router-policy-invalid"
+            self.add_issue(
+                result,
+                f"Recursive router policy invalid: {routed_role_bindings.error}.",
+            )
+            return
         if not routed_role_bindings:
             return
 
-        subagents_dir = run_root / "subagents"
-        routed_action_records: list[tuple[Path, str, str]] = []
-        if subagents_dir.exists():
-            for action_record in sorted(subagents_dir.glob("*.md")):
-                if not action_record.is_file():
+        routed_action_records: list[tuple[Path, str, str, str]] = []
+        directory_validation = recursive_action_contract.validate_action_record_path(
+            repo_root,
+            run_root,
+        )
+        if directory_validation.valid and directory_validation.path is not None:
+            for action_record in sorted(directory_validation.path.glob("*.md")):
+                path_validation = recursive_action_contract.validate_action_record_path(
+                    repo_root,
+                    run_root,
+                    action_record,
+                )
+                if not path_validation.valid or path_validation.path is None:
                     continue
                 try:
-                    action_text = action_record.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                    action_text = path_validation.path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
                     continue
-                binding = self.routed_action_record_binding(action_text)
+                binding = self.routed_action_record_binding(
+                    repo_root,
+                    run_root,
+                    path_validation.path,
+                    action_text,
+                    routed_role_bindings,
+                )
                 if binding is not None:
-                    routed_action_records.append((action_record, binding[0], binding[1]))
+                    routed_action_records.append((action_record, binding[0], binding[1], binding[2]))
 
         controller_synthesized_artifacts: list[str] = []
         for artifact_name in REQUIRED_RECURSIVE_RUN_FILES:
@@ -2263,7 +2829,7 @@ class BenchmarkHarness:
             }
             distinct_cli_records = [
                 action_record
-                for action_record, routed_cli, _routed_model in routed_action_records
+                for action_record, _routed_role, routed_cli, _routed_model in routed_action_records
                 if routed_cli != runner_slug
             ]
             if distinct_cli_bindings and not distinct_cli_records:
@@ -5598,6 +6164,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hint-penalty", type=float, default=5.0, help="Points deducted per hint event recorded in benchmark/hints.md.")
     parser.add_argument("--prepare-only", action="store_true", help="Set up repos and prompts but do not run agent commands.")
     parser.add_argument("--skip-npm-install", action="store_true", help="Skip npm install during repo preparation.")
+    parser.add_argument(
+        "--skip-dependency-provisioning",
+        action="store_false",
+        dest="provision_dependencies",
+        default=True,
+        help="Skip Rust target, Trunk, and package-manager provisioning (intended for controlled fixture/integration setup).",
+    )
     parser.add_argument("--list-scenarios", action="store_true", help="List packaged benchmark scenarios and exit.")
     return parser.parse_args()
 

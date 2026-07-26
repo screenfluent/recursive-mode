@@ -59,7 +59,7 @@ Every field is required. Pass numbers are zero-padded and consecutive. Pass `000
 - Controller verification: none
 ```
 
-IDs are append-only and never deleted, renumbered, reused, or regenerated. Immutable technical fields are `Discovered in pass`, `Kind`, `Kind justification` when present, `Location`, `Observed`, `Expected`, `Contract`, `Technical impact`, `Required outcome`, `Verification`, and `Depends on`. Mutable claim fields are `Claimed outcome`, `Claimed changes`, and `Claimed verification`. Corrections to immutable fields become new findings or controller rejection.
+IDs are protocol-level append-only and are never deleted, renumbered, reused, or regenerated in a valid later ledger. Fixed technical fields are `Discovered in pass`, `Kind`, `Kind justification` when present, `Location`, `Observed`, `Expected`, `Contract`, `Technical impact`, `Required outcome`, `Verification`, and `Depends on`. While a finding is `open`, only `Claimed outcome`, `Claimed changes`, and `Claimed verification` are mutable claim fields. After `Disposition` becomes anything other than `open`, the entire finding record, including every disposition-specific, claim, destination, ownership, approval, decision, and controller-verification field, is fixed in every valid later working ledger and pass. Corrections become new findings or controller rejection; terminal records are never rewritten under the protocol.
 
 Every nonblank line inside an `F-*` record is one field from the exact disposition-specific schema. Free prose, nested headings, malformed bullets, and unrecognized fields make the ledger invalid.
 
@@ -118,15 +118,15 @@ Disposition-specific fields appear immediately after `Disposition` and before cl
 
 Labels never close a finding. A delegated PASS, commit message, action record, or test report remains a claim until controller verification.
 
-`/.recursive/scripts/recursive_review_action.py` is the single parser and validator for persisted action-record claims. Every record cites the exact canonical protocol, immutable bundle, ledger, and four-digit pass. `## Claimed Findings` has one exact ordered schema: those four metadata fields, followed by either `Claims: none` or sorted `F-*` records containing only `Claimed outcome`, `Claimed changes`, and `Claimed verification` in that order. Residual prose, unknown bullets/headings, terminal disposition/controller fields, duplicate metadata, and reordered fields are invalid. Each claim must exist and remain `open` in that validated ledger/pass; cross-ledger or manually tampered claims are invalid. Generation, lint, and status consume this owner rather than duplicating claim parsing.
+`/.recursive/scripts/recursive_review_action.py` is the single parser and validator for persisted action-record claims. Every record cites the exact canonical protocol, hash-bound bundle, ledger, and four-digit pass. `## Claimed Findings` has one exact ordered schema: those four metadata fields, followed by either `Claims: none` or sorted `F-*` records containing only `Claimed outcome`, `Claimed changes`, and `Claimed verification` in that order. Residual prose, unknown bullets/headings, terminal disposition/controller fields, duplicate metadata, and reordered fields are invalid. Each claim must exist and remain `open` in that validated ledger/pass; cross-ledger or manually tampered claims are invalid. Generation, lint, and status consume this owner rather than duplicating claim parsing.
 
 Scheduled work follows the exact inventory contract below. Standalone reviews cannot schedule. Local ledgers, chat, memory, and known-repair Wayfinder units are not durable deferral destinations.
 
 ## Scheduled work
 
-`scheduled` is legal only inside an active recursive run and only when `RECURSIVE.md` already assigns the required outcome to a phase strictly later than the classified source artifact in the canonical phase rules. A controller-valid pending inventory activates that owner for this run, including an optional owner whose artifact has not been scaffolded yet. Malformed, dangling, mismatched, or consumed inventory records never activate a phase. Scheduling cannot move Phase 3 repair into Phase 4 merely because the repair list is long.
+`scheduled` is legal only inside an active recursive run and only when `RECURSIVE.md` already assigns the required outcome to a phase strictly later than the classified source artifact in the canonical phase rules. Scheduling uses its own complete canonical artifact/key registry, separate from audited-ledger ownership, so non-ledger Phase 5 has the scheduling key `phase-5`. A controller-valid pending inventory activates that owner for this run, including an optional owner whose artifact has not been scaffolded yet. An invalid or falsely consumed record continues to activate its canonical owner while also blocking validation, so corrupting consumption evidence cannot make the obligation disappear. Scheduling cannot move Phase 3 repair into Phase 4 merely because the repair list is long.
 
-A scheduled finding adds `Owner phase`, `Scheduling basis`, and `Destination` immediately after `Disposition: scheduled`. `Owner phase` is a later canonical artifact filename. `Scheduling basis` cites the existing ownership rule in `/.recursive/RECURSIVE.md`. `Destination` is exactly:
+A scheduled finding adds `Owner phase`, `Scheduling basis`, and `Destination` immediately after `Disposition: scheduled`. `Owner phase` is a later canonical artifact filename. `Scheduling basis` cites the existing ownership rule in `/.recursive/RECURSIVE.md`. `Source Ledger` and `Destination` are canonical in-repository paths whose complete component chains contain no symlink, reparse point, junction, or lexical escape; validation rejects a noncanonical address before reading it. `Destination` is exactly:
 
 - `/.recursive/run/<run-id>/evidence/reviews/scheduled/<owner-phase-key>/inventory.md`
 
@@ -139,22 +139,25 @@ The inventory has one deterministic record per source finding:
 
 - Source Ledger: `/.recursive/run/<run-id>/evidence/reviews/<source-phase-key>/<review-id>/ledger.md`
 - Finding ID: F-001
-- Kind: <copied immutable value>
-- Location: <copied immutable value>
-- Observed: <copied immutable value>
-- Expected: <copied immutable value>
-- Contract: <copied immutable value>
-- Technical impact: <copied immutable value>
-- Required outcome: <copied immutable value>
-- Verification: <copied immutable value>
+- Kind: <copied fixed value>
+- Location: <copied fixed value>
+- Observed: <copied fixed value>
+- Expected: <copied fixed value>
+- Contract: <copied fixed value>
+- Technical impact: <copied fixed value>
+- Required outcome: <copied fixed value>
+- Verification: <copied fixed value>
 - Owner phase: <later artifact filename>
 - Scheduling basis: <copied ownership citation>
 - Status: pending | consumed
 - Consumed in: none | `/.recursive/run/<run-id>/<owner-phase>`
+- Consumption record: none | <review-id>/F-001
+- Evidence Path: none | `/<canonical-repo-path>`
+- Evidence Hash: none | <sha256>
 - Controller verification: none | <target-phase verification>
 ```
 
-Every copied obligation field equals its source finding. `pending` uses `Consumed in: none` and `Controller verification: none`. `consumed` names the owner artifact and controller evidence. `Pending Scheduled Handoffs` records every scheduled finding emitted by the immutable source pass; later inventory consumption never rewrites that pass. A classified audited source phase may PASS with a valid pending handoff. The valid pending record makes its owner required and due in canonical status/prerequisite selection without precreating the artifact; the target cannot lock until the record is consumed, and final verification/closeout rejects every pending record. This dedicated evidence inventory does not propagate the full review ledger to the target phase.
+Every copied obligation field equals its source finding. `pending` uses `none` for all five consumption fields: `Consumed in`, `Consumption record`, `Evidence Path`, `Evidence Hash`, and `Controller verification`. `consumed` names an existing canonical regular non-symlink owner artifact, records the exact `<review-id>/F-*` backreference in both the inventory and owner artifact, and cites an existing canonical regular non-symlink evidence file plus its matching SHA-256 and controller verification. `Pending Scheduled Handoffs` records every scheduled finding emitted by the completed hash-bound source pass; later inventory consumption never rewrites that pass under the protocol. A classified audited source phase may PASS with a valid pending handoff. The valid pending record makes its owner required and due in canonical status/prerequisite selection without precreating the artifact; the target cannot lock until the record is consumed, and final verification/closeout rejects every pending record. This dedicated evidence inventory does not propagate the full review ledger to the target phase.
 
 ## Canonical paths
 
@@ -162,20 +165,20 @@ Active audited phase:
 
 - ledger: `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/ledger.md`
 - passes: `/.recursive/run/<run-id>/evidence/reviews/<phase-key>/<review-id>/passes/<NNNN>.md`
-- immutable bundle: `/.recursive/run/<run-id>/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`
+- hash-bound bundle: `/.recursive/run/<run-id>/evidence/review-bundles/<phase-key>/<review-id>/<NNNN>.md`
 
 Standalone:
 
 - ledger: `/.recursive/local/reviews/<review-id>/ledger.md`
 - passes: `/.recursive/local/reviews/<review-id>/passes/<NNNN>.md`
 
-The ledger is current operational state. Pass snapshots are immutable historical evidence. A review bundle is only the reproducible review input.
+The ledger is current operational state. Pass snapshots are hash-bound historical evidence, and a review bundle is only the reproducible review input. This chain is tamper-evident for partial or accidental drift while its hashes and references remain intact, but it is not cryptographically append-only against an actor that can rewrite the entire run. An external anchor, protected Git history, or controller-owned storage would provide that stronger guarantee separately.
 
-`/.recursive/scripts/recursive_phase_rules.py` owns the audited artifact/phase-key registry. `Review ID` is globally unique within the run, `Reviewed Artifact` is the same-pass canonical immutable bundle, and `Artifact Hash` is its byte hash. The generator refuses bundle overwrite; every historical pass keeps its cited bundle and hash.
+`/.recursive/scripts/recursive_phase_rules.py` owns separate audited-ledger and scheduling artifact/key registries. `Review ID` is globally unique within the run, `Reviewed Artifact` and `Diff Basis` are the same-pass canonical hash-bound bundle, and `Artifact Hash` is its byte hash. `Changed Files` exactly equals the bundle snapshot's `changed` path projection (`none` only for an empty projection). `Evidence Basis` exactly equals that bundle followed by the snapshot's ordered reference-path projection; partial overlap is invalid. The bundle's changed-file section and normalized diff basis must themselves exactly agree with the embedded snapshot. For a working-tree comparison, `## Diff Basis` records both fixed JSON argv operations used for membership: `Tracked diff argv` is `["diff","--name-only","-z",<baseline>,"--"]` and `Untracked files argv` is `["ls-files","--others","--exclude-standard","-z"]`; a commit-to-commit comparison records the exact range in the tracked argv and `Untracked files argv: none`. These arrays are arguments to the fixed `git -C <repo-root>` executable boundary and are never shell commands. `Normalized diff command` remains a human-readable summary of only the tracked comparison; the two argv fields are authoritative for complete snapshot membership. The generator refuses bundle overwrite; every historical pass keeps its cited bundle and hash.
 
 Every audited receipt has exactly `## Review Metadata` with fields in this order: `Review ID`, `Review Ledger Path`, `Latest Verified Pass`, `Latest Verified Pass Hash`, `Review Bundle Path`, `Review Bundle Hash`. The generic adapter verifies those pointers plus bundle phase/review/pass, `Artifact Path`, bundle hash, audit payload, and whole-ledger PASS.
 
-Every bundle embeds one deterministic `recursive-review-surface-v1` snapshot. `/.recursive/scripts/recursive_review_surface.py` is the single owner used by bundle generation and validation: it binds changed-file membership (including untracked and deleted paths), file state, mode, bytes, and every local reviewed/evidence reference. Explicit reviewed/evidence references must resolve directly to regular files; directory, symlink, missing, and other non-regular references are invalid. Changed-surface symlinks remain valid link-state records whose target text, mode, and state are bound. It invokes Git only through fixed argument vectors and never executes a bundle-supplied shell command. Current-pass validation recomputes the snapshot, so any membership, byte, mode, deletion, or referenced-evidence change requires a refreshed bundle and next pass. Historical pass validation checks the immutable bundle and its hash without comparing old surface records to current repository bytes.
+Every bundle embeds one deterministic `recursive-review-surface-v1` snapshot. `/.recursive/scripts/recursive_review_surface.py` is the single owner used by bundle generation and validation: it binds changed-file membership (including untracked and deleted paths), file state, mode, bytes, and every local reviewed/evidence reference. Explicit reviewed/evidence references must resolve directly to regular files; directory, symlink, missing, and other non-regular references are invalid. Changed-surface symlinks remain valid link-state records whose target text, mode, and state are bound. It invokes Git only through fixed argument vectors and never executes a bundle-supplied shell command. Current-pass validation recomputes the snapshot, so any membership, byte, mode, deletion, or referenced-evidence change requires a refreshed bundle and next pass. Historical pass validation checks the hash-bound bundle and its hash without comparing old surface records to current repository bytes.
 
 Audit payload profile `recursive-review-audit-payload-v1` normalizes line endings to LF and neutralizes only controller-derived `Status`, `LockedAt`, `LockHash`, exact Review Metadata field values, and exact `Audit`, `Coverage`, and `Approval` PASS/FAIL result lines. Author-owned audit, requirement, and diff content remains hashed. The bundle records raw artifact-content hash, audit payload hash, and profile.
 
@@ -197,7 +200,7 @@ Complete Pass N:
 
 Begin Pass N+1 before any repair mutation:
 
-1. Require immutable snapshot N and verify its cited hash.
+1. Require completed snapshot N and verify its cited hash.
 2. Copy it to `ledger.md`; increment Pass and cite snapshot N plus its actual hash.
 3. Reset Verdict to FAIL with empty controller verification.
 4. Reset claim fields to `none` only for open findings; terminal records retain history.

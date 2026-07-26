@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,6 +61,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             hint_penalty=5.0,
             prepare_only=False,
             skip_npm_install=True,
+            provision_dependencies=False,
             list_scenarios=False,
         )
         self.harness = rrb.BenchmarkHarness(args)
@@ -204,6 +207,168 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             self._write(run_root / artifact_name, f"# {artifact_name}\n")
         return run_root
 
+    def _canonical_routed_action(
+        self,
+        *,
+        action_name: str = "worker-1.md",
+        phase: str = "Phase 2",
+        execution_mode: str = "planner",
+        routed_role: str = "planner",
+        routed_cli: str = "codex",
+        routed_model: str = "gpt-5.4-mini",
+        current_artifact: str | None = None,
+        review_bundle: str = "none",
+        prompt_bundle_path: str = "none",
+        output_capture_paths: tuple[str, ...] = (),
+        evidence_used: tuple[str, ...] = (),
+        findings: str = "- none",
+    ) -> str:
+        current_artifact = current_artifact or f"/.recursive/run/{self.run_id}/02-to-be-plan.md"
+        output_capture_lines = "\n".join(f"  - `{path}`" for path in output_capture_paths) or "  - none"
+        evidence_lines = "\n".join(f"- `{path}`" for path in evidence_used) or "- none"
+        return f"""# Subagent Action Record
+
+## Metadata
+- Subagent ID: `worker-1`
+- Run ID: `{self.run_id}`
+- Phase: `{phase}`
+- Purpose: `delegated benchmark work`
+- Execution Mode: `{execution_mode}`
+- Timestamp: `2026-01-01T00:00:00Z`
+- Action Record Path: `/.recursive/run/{self.run_id}/subagents/{action_name}`
+
+## Inputs Provided
+- Current Artifact: `{current_artifact}`
+- Artifact Content Hash: `fixture`
+- Upstream Artifacts:
+  - `/.recursive/run/{self.run_id}/01-as-is.md`
+- Addenda:
+  - none
+- Review Bundle: `{review_bundle}`
+- Diff Basis: `baseline..working-tree`
+- Code Refs:
+  - `/src/app.rs`
+- Memory Refs:
+  - none
+- Audit / Task Questions:
+  - complete the routed task
+
+## Routing
+- Router Used: `recursive-router`
+- Routed Role: `{routed_role}`
+- Routed CLI: `{routed_cli}`
+- Routed Model: `{routed_model}`
+- Routing Config Path: `/.recursive/config/recursive-router.json`
+- Routing Discovery Path: `/.recursive/config/recursive-router-discovered.json`
+- Routing Resolution Basis: `role_routes.{routed_role}`
+- Routing Fallback Reason: `none`
+- CLI Probe Summary: `available`
+- Prompt Bundle Path: `{prompt_bundle_path}`
+- Invocation Exit Code: `0`
+- Output Capture Paths:
+{output_capture_lines}
+
+## Claimed Actions Taken
+- completed routed benchmark work
+
+## Claimed File Impact
+### Created
+- none
+### Modified
+- none
+### Reviewed
+- `/src/app.rs`
+### Relevant but Untouched
+- none
+
+## Claimed Artifact Impact
+### Read
+- `/.recursive/run/{self.run_id}/02-to-be-plan.md`
+### Updated
+- none
+### Evidence Used
+{evidence_lines}
+
+## Claimed Findings
+{findings}
+
+## Verification Handoff
+- Inspect first:
+  - `/src/app.rs`
+- Notes:
+  - controller verification required
+"""
+
+    def _write_routed_provenance(
+        self,
+        run_root: Path,
+        *,
+        stem: str,
+        routed_role: str = "planner",
+        routed_cli: str = "codex",
+        routed_model: str = "gpt-5.4-mini",
+        output_text: str = "bounded routed response",
+    ) -> tuple[str, tuple[str, str]]:
+        prompt_path = run_root / "router-prompts" / f"{stem}.md"
+        output_path = run_root / "evidence" / "router" / f"{stem}-output.md"
+        receipt_path = run_root / "evidence" / "router" / f"{stem}-invocation.json"
+        prompt_display = f"/.recursive/run/{self.run_id}/router-prompts/{stem}.md"
+        output_display = f"/.recursive/run/{self.run_id}/evidence/router/{stem}-output.md"
+        receipt_display = f"/.recursive/run/{self.run_id}/evidence/router/{stem}-invocation.json"
+        self._write(prompt_path, f"Perform the bounded {routed_role} task.")
+        self._write(output_path, output_text)
+        self._write(
+            receipt_path,
+            json.dumps(
+                {
+                    "role": routed_role,
+                    "decision": {
+                        "role": routed_role,
+                        "decision": "external-cli",
+                        "cli": routed_cli,
+                        "model": routed_model,
+                        "config_path": ".recursive/config/recursive-router.json",
+                        "discovery_path": ".recursive/config/recursive-router-discovered.json",
+                    },
+                    "cli": routed_cli,
+                    "model": routed_model,
+                    "output_text": output_text,
+                    "exit_code": 0,
+                    "success": True,
+                    "prompt_source": "file",
+                    "prompt_bundle_path": prompt_display.lstrip("/"),
+                },
+                indent=2,
+            ),
+        )
+        return prompt_display, (output_display, receipt_display)
+
+    def _write_canonical_routed_action_fixture(
+        self,
+        run_root: Path,
+        *,
+        stem: str = "planner",
+    ) -> tuple[Path, str, dict[str, tuple[str, str]], str, tuple[str, str]]:
+        subagents = run_root / "subagents"
+        subagents.mkdir(exist_ok=True)
+        action_name = f"{stem}.md"
+        action_path = subagents / action_name
+        prompt_path, capture_paths = self._write_routed_provenance(run_root, stem=stem)
+        content = self._canonical_routed_action(
+            action_name=action_name,
+            prompt_bundle_path=prompt_path,
+            output_capture_paths=capture_paths,
+            evidence_used=capture_paths,
+        )
+        self._write(action_path, content)
+        return (
+            action_path,
+            content,
+            {"planner": ("codex", "gpt-5.4-mini")},
+            prompt_path,
+            capture_paths,
+        )
+
     def test_seeded_run_requirements_are_locked_recursive_artifact(self) -> None:
         content = self.harness.render_seeded_run_requirements(self.run_id)
 
@@ -225,6 +390,34 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             lock_hash.group(1),
         )
         self.assertIn("### `R7` Quality gates", content)
+
+    def test_dependency_provisioning_is_disabled_for_unit_fixtures_but_retained_as_integration_seam(self) -> None:
+        logs_root = self.workspace_root / "provisioning-seam"
+        logs_root.mkdir(parents=True)
+        result = self._make_result()
+        self.harness.prepare_rust_wasm_toolchain = mock.Mock()  # type: ignore[method-assign]
+
+        self.harness.provision_scenario_dependencies(self.repo_root, logs_root, result)
+        self.harness.prepare_rust_wasm_toolchain.assert_not_called()
+
+        self.harness.provision_dependencies = True
+        self.harness.provision_scenario_dependencies(self.repo_root, logs_root, result)
+        self.harness.prepare_rust_wasm_toolchain.assert_called_once_with(logs_root, result)
+
+    def test_prebuilt_trunk_download_failure_still_returns_false_for_cargo_fallback(self) -> None:
+        logs_root = self.workspace_root / "prebuilt-trunk-fallback"
+        logs_root.mkdir(parents=True)
+        result = self._make_result()
+        toolchain_root = self.temp_dir / "toolchain"
+        self.harness.resolve_trunk_asset_name = mock.Mock(return_value="trunk-test.tar.gz")  # type: ignore[method-assign]
+        self.harness.benchmark_toolchain_root = mock.Mock(return_value=toolchain_root)  # type: ignore[method-assign]
+
+        with mock.patch.object(rrb.urllib.request, "urlopen", side_effect=OSError("offline fixture")):
+            downloaded = self.harness.try_download_prebuilt_trunk(logs_root, result)
+
+        self.assertFalse(downloaded)
+        self.assertIn("trunk_download", result.log_paths)
+        self.assertIn("offline fixture", (logs_root / "trunk-download.log").read_text(encoding="utf-8"))
 
     def test_seeded_recursive_templates_include_phase2_and_repo_root_relative_worktree_examples(self) -> None:
         templates = self.harness.render_recursive_template_files(
@@ -515,7 +708,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             slug="kimi",
             display_name="Kimi CLI",
             provider_family="moonshot-kimi",
-            executable="C:\\Users\\erikb\\.local\\bin\\kimi.exe",
+            executable="C:\\Users\\fixture\\.local\\bin\\kimi.exe",
             model="kimi-k2.6",
             supports_json=False,
         )
@@ -542,8 +735,8 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
                         },
                     },
                     "cli_overrides": {
-                        "kimi": {"command": "C:\\Users\\erikb\\.local\\bin\\kimi.exe"},
-                        "codex": {"command": "C:\\Users\\erikb\\.local\\bin\\codex.exe"},
+                        "kimi": {"command": "C:\\Users\\fixture\\.local\\bin\\kimi.exe"},
+                        "codex": {"command": "C:\\Users\\fixture\\.local\\bin\\codex.exe"},
                     },
                 },
                 indent=2,
@@ -572,7 +765,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             slug="kimi",
             display_name="Kimi CLI",
             provider_family="moonshot-kimi",
-            executable="C:\\Users\\erikb\\.local\\bin\\kimi.exe",
+            executable="C:\\Users\\fixture\\.local\\bin\\kimi.exe",
             model="kimi-k2.6",
             supports_json=False,
         )
@@ -620,9 +813,9 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
                         },
                     },
                     "cli_overrides": {
-                        "kimi": {"command": "C:\\Users\\erikb\\.local\\bin\\kimi.exe"},
-                        "codex": {"command": "C:\\Users\\erikb\\.local\\bin\\codex.exe"},
-                        "opencode": {"command": "C:\\Users\\erikb\\.local\\bin\\opencode.exe"},
+                        "kimi": {"command": "C:\\Users\\fixture\\.local\\bin\\kimi.exe"},
+                        "codex": {"command": "C:\\Users\\fixture\\.local\\bin\\codex.exe"},
+                        "opencode": {"command": "C:\\Users\\fixture\\.local\\bin\\opencode.exe"},
                     },
                 },
                 indent=2,
@@ -710,6 +903,140 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
 
         self.assertFalse(self.harness.has_configured_recursive_router_policy(placeholder_policy))
         self.assertTrue(self.harness.has_configured_recursive_router_policy(configured_policy))
+
+    def test_has_configured_recursive_router_policy_fails_closed_for_unsafe_input(self) -> None:
+        configured_payload = json.dumps(
+            {
+                "role_routes": {
+                    "analyst": {
+                        "enabled": True,
+                        "mode": "external-cli",
+                        "cli": "codex",
+                        "model": "gpt-5.4-mini",
+                    }
+                },
+                "cli_overrides": {"codex": {"command": "codex"}},
+            }
+        )
+        for unsafe_kind in ("malformed-json", "malformed-schema", "invalid-utf8", "symlink", "hardlink"):
+            with self.subTest(unsafe_kind=unsafe_kind):
+                policy_path = self.temp_dir / f"unsafe-router-{unsafe_kind}.json"
+                if unsafe_kind == "malformed-json":
+                    self._write(policy_path, '{"role_routes":')
+                elif unsafe_kind == "malformed-schema":
+                    self._write(
+                        policy_path,
+                        json.dumps(
+                            {
+                                "role_routes": {
+                                    "analyst": {
+                                        "enabled": 1,
+                                        "mode": "external-cli",
+                                        "cli": "codex",
+                                        "model": "gpt-5.4-mini",
+                                    }
+                                },
+                                "cli_overrides": {},
+                            }
+                        ),
+                    )
+                elif unsafe_kind == "invalid-utf8":
+                    policy_path.write_bytes(b"\xff\xfe")
+                else:
+                    external_path = self.temp_dir / f"external-router-{unsafe_kind}.json"
+                    self._write(external_path, configured_payload)
+                    try:
+                        if unsafe_kind == "symlink":
+                            policy_path.symlink_to(external_path)
+                        else:
+                            os.link(external_path, policy_path)
+                    except (NotImplementedError, OSError) as exc:
+                        self.skipTest(f"{unsafe_kind} is unavailable: {exc}")
+
+                self.assertFalse(
+                    self.harness.has_configured_recursive_router_policy(policy_path)
+                )
+
+    def test_router_config_sync_skips_unsafe_policy_even_with_safe_discovery(self) -> None:
+        configured_payload = json.dumps(
+            {
+                "role_routes": {
+                    "analyst": {
+                        "enabled": True,
+                        "mode": "external-cli",
+                        "cli": "codex",
+                        "model": "gpt-5.4-mini",
+                    }
+                },
+                "cli_overrides": {"codex": {"command": "codex"}},
+            }
+        )
+        safe_discovery = json.dumps(
+            {
+                "version": 1,
+                "probe_tool": "recursive-router-probe",
+                "probe_status": "ok",
+                "clis": [],
+            }
+        )
+        for unsafe_kind in (
+            "malformed-json",
+            "malformed-schema",
+            "invalid-utf8",
+            "symlink",
+            "hardlink",
+        ):
+            with self.subTest(unsafe_kind=unsafe_kind):
+                source_root = self.temp_dir / f"unsafe-sync-{unsafe_kind}" / "source"
+                target_root = self.temp_dir / f"unsafe-sync-{unsafe_kind}" / "target"
+                source_root.mkdir(parents=True)
+                policy_path = source_root / "recursive-router.json"
+                self._write(source_root / "recursive-router-discovered.json", safe_discovery)
+                if unsafe_kind == "malformed-json":
+                    self._write(policy_path, '{"role_routes":')
+                elif unsafe_kind == "malformed-schema":
+                    self._write(
+                        policy_path,
+                        json.dumps(
+                            {
+                                "role_routes": {
+                                    "analyst": {
+                                        "enabled": 1,
+                                        "mode": "external-cli",
+                                        "cli": "codex",
+                                        "model": "gpt-5.4-mini",
+                                    }
+                                },
+                                "cli_overrides": {},
+                            }
+                        ),
+                    )
+                elif unsafe_kind == "invalid-utf8":
+                    policy_path.write_bytes(b"\xff\xfe")
+                else:
+                    external_path = self.temp_dir / f"sync-external-router-{unsafe_kind}.json"
+                    self._write(external_path, configured_payload)
+                    try:
+                        if unsafe_kind == "symlink":
+                            policy_path.symlink_to(external_path)
+                        else:
+                            os.link(external_path, policy_path)
+                    except (NotImplementedError, OSError) as exc:
+                        self.skipTest(f"{unsafe_kind} is unavailable: {exc}")
+
+                self.assertTrue(
+                    self.harness.should_bootstrap_recursive_router_config(source_root)
+                )
+                changed = self.harness.sync_recursive_router_config_tree(
+                    source_root,
+                    target_root,
+                )
+
+                self.assertTrue(changed)
+                self.assertFalse((target_root / "recursive-router.json").exists())
+                self.assertTrue(
+                    (target_root / "recursive-router-discovered.json").is_file()
+                )
 
     def test_sync_recursive_router_config_into_worktree_copies_configured_policy(self) -> None:
         result = self._make_result()
@@ -1210,9 +1537,9 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
                         },
                     },
                     "cli_overrides": {
-                        "kimi": {"command": "C:\\Users\\erikb\\.local\\bin\\kimi.exe"},
-                        "codex": {"command": "C:\\Users\\erikb\\.local\\bin\\codex.exe"},
-                        "opencode": {"command": "C:\\Users\\erikb\\.local\\bin\\opencode.exe"},
+                        "kimi": {"command": "C:\\Users\\fixture\\.local\\bin\\kimi.exe"},
+                        "codex": {"command": "C:\\Users\\fixture\\.local\\bin\\codex.exe"},
+                        "opencode": {"command": "C:\\Users\\fixture\\.local\\bin\\opencode.exe"},
                     },
                 },
                 indent=2,
@@ -1403,7 +1730,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
                         },
                     },
                     "cli_overrides": {
-                        "kimi": {"command": "C:\\Users\\erikb\\.local\\bin\\kimi.exe"},
+                        "kimi": {"command": "C:\\Users\\fixture\\.local\\bin\\kimi.exe"},
                         "codex": {"command": "C:\\codex.exe"},
                     },
                 },
@@ -1445,6 +1772,625 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             "Recursive routed delegation evidence missing: no routed subagent action records using a CLI distinct from orchestrator runner were found.",
             result.issues,
         )
+
+    def test_evaluate_recursive_run_rejects_malformed_pseudo_action_record_with_routing_lines(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        self._write(
+            self.repo_root / ".recursive" / "config" / "recursive-router.json",
+            json.dumps(
+                {
+                    "role_routes": {
+                        "planner": {
+                            "enabled": True,
+                            "mode": "external-cli",
+                            "cli": "codex",
+                            "model": "gpt-5.4-mini",
+                            "fallback": "self-audit",
+                        }
+                    },
+                    "cli_overrides": {"codex": {"command": "C:\\codex.exe"}},
+                },
+                indent=2,
+            ),
+        )
+        subagents_dir = run_root / "subagents"
+        subagents_dir.mkdir(parents=True, exist_ok=True)
+        self._write(
+            subagents_dir / "pseudo-action.md",
+            "\n".join(
+                [
+                    "# Not a canonical action record",
+                    "",
+                    "## Routing",
+                    "- Routed Role: `planner`",
+                    "- Routed CLI: `codex`",
+                    "- Routed Model: `gpt-5.4-mini`",
+                ]
+            ),
+        )
+        logs_root = self.workspace_root / "kimi" / "recursive-on" / "logs"
+        logs_root.mkdir(parents=True, exist_ok=True)
+        result = self._make_result()
+        result.runner_slug = "kimi"
+        result.runner_name = "Kimi CLI"
+        result.provider_family = "moonshot-kimi"
+        result.model = "kimi-k2.6"
+        self.harness.run_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=rrb.CommandResult(
+                command=["lint"],
+                returncode=0,
+                stdout="lint ok\n",
+                stderr="",
+                duration_seconds=0.5,
+            )
+        )
+
+        self.harness.evaluate_recursive_run(self.repo_root, logs_root, result)
+
+        self.assertEqual("routed-evidence-missing", result.recursive_workflow_status)
+        self.assertIn("Recursive routed delegation evidence missing: no routed subagent action records were found.", result.issues)
+        self.assertIn(
+            "Recursive routed delegation evidence missing: no routed subagent action records using a CLI distinct from orchestrator runner were found.",
+            result.issues,
+        )
+
+    def test_configured_routed_role_policy_uses_only_typed_enabled_external_routes(self) -> None:
+        policy_path = self.repo_root / ".recursive" / "config" / "recursive-router.json"
+        self._write(
+            policy_path,
+            json.dumps(
+                {
+                    "role_routes": {
+                        "planner": {
+                            "enabled": True,
+                            "mode": "external-cli",
+                            "cli": "codex",
+                            "model": "gpt-5.4-mini",
+                        },
+                        "tester": {
+                            "enabled": False,
+                            "mode": "external-cli",
+                            "cli": "opencode",
+                            "model": "github-copilot/gpt-5-mini",
+                        },
+                        "analyst": {
+                            "enabled": True,
+                            "mode": "local-only",
+                            "cli": "kimi",
+                            "model": "kimi-code/kimi-for-coding",
+                        },
+                    }
+                },
+                indent=2,
+            ),
+        )
+
+        bindings = self.harness.configured_recursive_routed_role_bindings(policy_path)
+
+        self.assertEqual({"planner": ("codex", "gpt-5.4-mini")}, dict(bindings))
+        self.assertEqual("", bindings.error)
+
+    def test_configured_routed_role_policy_rejects_malformed_route_types(self) -> None:
+        policy_path = self.repo_root / ".recursive" / "config" / "recursive-router.json"
+        malformed_values = (
+            ("enabled", 1),
+            ("mode", ["external-cli"]),
+            ("cli", 7),
+            ("model", {"name": "gpt-5.4-mini"}),
+            ("cli", ""),
+            ("model", " "),
+        )
+        for field_name, malformed_value in malformed_values:
+            with self.subTest(field_name=field_name):
+                route = {
+                    "enabled": True,
+                    "mode": "external-cli",
+                    "cli": "codex",
+                    "model": "gpt-5.4-mini",
+                }
+                route[field_name] = malformed_value
+                self._write(
+                    policy_path,
+                    json.dumps({"role_routes": {"planner": route}}, indent=2),
+                )
+
+                bindings = self.harness.configured_recursive_routed_role_bindings(policy_path)
+
+                self.assertEqual({}, dict(bindings))
+                self.assertIn(f".{field_name}", bindings.error)
+
+    def test_malformed_routed_role_policy_produces_structured_benchmark_failure(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        policy_path = self.repo_root / ".recursive" / "config" / "recursive-router.json"
+        self._write(policy_path, '{"role_routes":')
+        result = self._make_result()
+        result.recursive_workflow_status = "complete"
+
+        self.harness.evaluate_routed_recursive_evidence(self.repo_root, run_root, result)
+
+        self.assertEqual("router-policy-invalid", result.recursive_workflow_status)
+        self.assertTrue(
+            any(issue.startswith("Recursive router policy invalid: ") for issue in result.issues)
+        )
+
+    def test_configured_routed_role_policy_rejects_missing_role_routes(self) -> None:
+        policy_path = self.repo_root / ".recursive" / "config" / "recursive-router.json"
+        self._write(policy_path, "{}")
+
+        bindings = self.harness.configured_recursive_routed_role_bindings(policy_path)
+
+        self.assertEqual({}, dict(bindings))
+        self.assertIn("missing role_routes", bindings.error)
+
+    def test_configured_routed_role_policy_rejects_invalid_utf8(self) -> None:
+        policy_path = self.repo_root / ".recursive" / "config" / "recursive-router.json"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_bytes(b"\xff\xfe\x00")
+
+        bindings = self.harness.configured_recursive_routed_role_bindings(policy_path)
+
+        self.assertEqual({}, dict(bindings))
+        self.assertIn("UTF-8", bindings.error)
+
+    def test_configured_routed_role_policy_rejects_symlink_or_hardlink(self) -> None:
+        policy_path = self.repo_root / ".recursive" / "config" / "recursive-router.json"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_payload = json.dumps(
+            {
+                "role_routes": {
+                    "planner": {
+                        "enabled": True,
+                        "mode": "external-cli",
+                        "cli": "codex",
+                        "model": "gpt-5.4-mini",
+                    }
+                }
+            }
+        )
+        for link_kind in ("symlink", "hardlink"):
+            with self.subTest(link_kind=link_kind):
+                policy_path.unlink(missing_ok=True)
+                external_path = self.temp_dir / f"external-router-policy-{link_kind}.json"
+                self._write(external_path, policy_payload)
+                try:
+                    if link_kind == "symlink":
+                        policy_path.symlink_to(external_path)
+                    else:
+                        os.link(external_path, policy_path)
+                except (NotImplementedError, OSError) as exc:
+                    self.skipTest(f"{link_kind} is unavailable: {exc}")
+
+                bindings = self.harness.configured_recursive_routed_role_bindings(policy_path)
+
+                self.assertEqual({}, dict(bindings))
+                self.assertIn("unique regular file", bindings.error)
+
+    def test_configured_routed_role_policy_rejects_noncanonical_location(self) -> None:
+        policy_path = self.temp_dir / "other" / "router-policy.json"
+        self._write(policy_path, json.dumps({"role_routes": {}}))
+
+        bindings = self.harness.configured_recursive_routed_role_bindings(policy_path)
+
+        self.assertEqual({}, dict(bindings))
+        self.assertIn("not at .recursive/config/recursive-router.json", bindings.error)
+
+    def test_routed_binding_rejects_agent_only_records_without_prompt_output_or_receipt(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        subagents = run_root / "subagents"
+        subagents.mkdir()
+        bindings = {"planner": ("codex", "gpt-5.4-mini")}
+        for execution_mode in ("planner", "implementer"):
+            with self.subTest(execution_mode=execution_mode):
+                action_path = subagents / f"{execution_mode}.md"
+                content = self._canonical_routed_action(execution_mode=execution_mode)
+                self._write(action_path, content)
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertIsNone(binding)
+
+    def test_routed_binding_accepts_canonical_prompt_output_and_receipt_chain(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        subagents = run_root / "subagents"
+        subagents.mkdir()
+        bindings = {"planner": ("codex", "gpt-5.4-mini")}
+        for execution_mode in ("planner", "implementer"):
+            with self.subTest(execution_mode=execution_mode):
+                action_name = f"{execution_mode}.md"
+                action_path = subagents / action_name
+                prompt_path, capture_paths = self._write_routed_provenance(
+                    run_root,
+                    stem=execution_mode,
+                )
+                content = self._canonical_routed_action(
+                    action_name=action_name,
+                    execution_mode=execution_mode,
+                    prompt_bundle_path=prompt_path,
+                    output_capture_paths=capture_paths,
+                    evidence_used=capture_paths,
+                )
+                self._write(action_path, content)
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertEqual(("planner", "codex", "gpt-5.4-mini"), binding)
+
+    def test_routed_binding_rejects_noncanonical_router_identity(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        action_path, content, bindings, _prompt_display, _capture_displays = (
+            self._write_canonical_routed_action_fixture(run_root)
+        )
+        content = content.replace(
+            "- Router Used: `recursive-router`",
+            "- Router Used: `agent-claimed-router`",
+        )
+        self._write(action_path, content)
+        binding = self.harness.routed_action_record_binding(
+            self.repo_root,
+            run_root,
+            action_path,
+            content,
+            bindings,
+        )
+        self.assertIsNone(binding)
+
+    def test_routed_binding_rejects_config_or_discovery_metadata_mismatch(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        mismatch_kinds = (
+            "action-config",
+            "action-discovery",
+            "decision-config",
+            "decision-discovery",
+        )
+        for mismatch_kind in mismatch_kinds:
+            with self.subTest(mismatch_kind=mismatch_kind):
+                action_path, content, bindings, _prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"path-mismatch-{mismatch_kind}",
+                    )
+                )
+                receipt_path = self.repo_root / capture_displays[1].lstrip("/")
+                if mismatch_kind == "action-config":
+                    content = content.replace(
+                        "- Routing Config Path: `/.recursive/config/recursive-router.json`",
+                        "- Routing Config Path: `/.recursive/config/other-router.json`",
+                    )
+                    self._write(action_path, content)
+                elif mismatch_kind == "action-discovery":
+                    content = content.replace(
+                        "- Routing Discovery Path: `/.recursive/config/recursive-router-discovered.json`",
+                        "- Routing Discovery Path: `/.recursive/config/other-discovery.json`",
+                    )
+                    self._write(action_path, content)
+                else:
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    decision_field = (
+                        "config_path"
+                        if mismatch_kind == "decision-config"
+                        else "discovery_path"
+                    )
+                    receipt["decision"][decision_field] = ".recursive/config/other.json"
+                    self._write(receipt_path, json.dumps(receipt, indent=2))
+
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+
+                self.assertIsNone(binding)
+
+    def test_routed_binding_rejects_non_string_receipt_route_metadata(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        for field_name in ("role", "cli", "model", "config_path", "discovery_path"):
+            with self.subTest(field_name=field_name):
+                action_path, content, bindings, _prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"non-string-{field_name}",
+                    )
+                )
+                receipt_path = self.repo_root / capture_displays[1].lstrip("/")
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if field_name in {"config_path", "discovery_path"}:
+                    receipt["decision"][field_name] = 7
+                else:
+                    receipt[field_name] = 7
+                    receipt["decision"][field_name] = 7
+                self._write(receipt_path, json.dumps(receipt, indent=2))
+
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+
+                self.assertIsNone(binding)
+
+    def test_routed_binding_accepts_full_reviewer_record_bound_to_current_pass(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        ledger_path = f"/.recursive/run/{self.run_id}/evidence/reviews/phase-3-5/review/ledger.md"
+        bundle_path = f"/.recursive/run/{self.run_id}/evidence/review-bundles/phase-3-5/review/0001.md"
+        self._write(self.repo_root / ledger_path.lstrip("/"), "# Review ledger fixture\n")
+        self._write(self.repo_root / bundle_path.lstrip("/"), "# Review bundle fixture\n")
+        self._write(
+            run_root / "03.5-code-review.md",
+            f"""## Review Metadata
+- Review Ledger Path: `{ledger_path}`
+- Review Bundle Path: `{bundle_path}`
+""",
+        )
+        subagents = run_root / "subagents"
+        subagents.mkdir()
+        action_path = subagents / "reviewer.md"
+        prompt_path, capture_paths = self._write_routed_provenance(
+            run_root,
+            stem="reviewer",
+            routed_role="code-reviewer",
+        )
+        findings = f"""- Review Protocol: `/.agents/skills/recursive-review/references/finding-protocol.md`
+- Review Bundle: `{bundle_path}`
+- Review Ledger: `{ledger_path}`
+- Review Pass: 0001
+- Claims: none"""
+        content = self._canonical_routed_action(
+            action_name="reviewer.md",
+            phase="Phase 3.5",
+            execution_mode="reviewer",
+            routed_role="code-reviewer",
+            current_artifact=f"/.recursive/run/{self.run_id}/03.5-code-review.md",
+            review_bundle=bundle_path,
+            prompt_bundle_path=prompt_path,
+            output_capture_paths=capture_paths,
+            evidence_used=capture_paths,
+            findings=findings,
+        )
+        self._write(action_path, content)
+        document = rrb.recursive_action_contract.review_ledger.ReviewDocument(
+            "",
+            {"Pass": "0001", "Reviewed Artifact": bundle_path},
+            {},
+            {},
+        )
+        with mock.patch.object(
+            rrb.recursive_action_contract.review_ledger,
+            "validate_ledger",
+            return_value=rrb.recursive_action_contract.review_ledger.ValidationResult(document=document),
+        ):
+            binding = self.harness.routed_action_record_binding(
+                self.repo_root,
+                run_root,
+                action_path,
+                content,
+                {"code-reviewer": ("codex", "gpt-5.4-mini")},
+            )
+        self.assertEqual(("code-reviewer", "codex", "gpt-5.4-mini"), binding)
+
+    def test_routed_binding_rejects_missing_prompt_output_or_receipt_file(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        for missing_kind, capture_index in (("prompt", None), ("output", 0), ("receipt", 1)):
+            with self.subTest(missing_kind=missing_kind):
+                action_path, content, bindings, prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"missing-{missing_kind}",
+                    )
+                )
+                missing_display = (
+                    prompt_display
+                    if capture_index is None
+                    else capture_displays[capture_index]
+                )
+                (self.repo_root / missing_display.lstrip("/")).unlink()
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertIsNone(binding)
+
+    def test_routed_binding_rejects_symlinked_prompt_output_or_receipt_file(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        for linked_kind, capture_index in (("prompt", None), ("output", 0), ("receipt", 1)):
+            with self.subTest(linked_kind=linked_kind):
+                action_path, content, bindings, prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"linked-{linked_kind}",
+                    )
+                )
+                linked_display = (
+                    prompt_display
+                    if capture_index is None
+                    else capture_displays[capture_index]
+                )
+                linked_path = self.repo_root / linked_display.lstrip("/")
+                external_path = self.temp_dir / f"external-{linked_kind}{linked_path.suffix}"
+                shutil.copy2(linked_path, external_path)
+                linked_path.unlink()
+                try:
+                    linked_path.symlink_to(external_path)
+                except (NotImplementedError, OSError) as exc:
+                    self.skipTest(f"file symlinks are unavailable: {exc}")
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertIsNone(binding)
+
+    def test_routed_binding_rejects_hardlinked_prompt_output_or_receipt_file(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        for linked_kind, capture_index in (("prompt", None), ("output", 0), ("receipt", 1)):
+            with self.subTest(linked_kind=linked_kind):
+                action_path, content, bindings, prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"hardlinked-{linked_kind}",
+                    )
+                )
+                linked_display = (
+                    prompt_display
+                    if capture_index is None
+                    else capture_displays[capture_index]
+                )
+                linked_path = self.repo_root / linked_display.lstrip("/")
+                external_path = self.temp_dir / f"hardlink-source-{linked_kind}{linked_path.suffix}"
+                shutil.copy2(linked_path, external_path)
+                linked_path.unlink()
+                try:
+                    os.link(external_path, linked_path)
+                except OSError as exc:
+                    self.skipTest(f"hardlinks are unavailable: {exc}")
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertIsNone(binding)
+
+    def test_routed_binding_rejects_receipt_role_cli_model_or_exit_mismatch(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        mutations = {
+            "role": ("role", "tester"),
+            "cli": ("cli", "opencode"),
+            "model": ("model", "gpt-5-tampered"),
+            "exit": ("exit_code", 1),
+        }
+        for mismatch_kind, (field_name, field_value) in mutations.items():
+            with self.subTest(mismatch_kind=mismatch_kind):
+                action_path, content, bindings, _prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"mismatch-{mismatch_kind}",
+                    )
+                )
+                receipt_path = self.repo_root / capture_displays[1].lstrip("/")
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                receipt[field_name] = field_value
+                if field_name in {"role", "cli", "model"}:
+                    receipt["decision"][field_name] = field_value
+                self._write(receipt_path, json.dumps(receipt, indent=2))
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertIsNone(binding)
+
+    def test_routed_binding_rejects_tampered_output_or_receipt_cross_binding(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        for tamper_kind in ("action-path", "output", "receipt-output", "receipt-prompt"):
+            with self.subTest(tamper_kind=tamper_kind):
+                action_path, content, bindings, _prompt_display, capture_displays = (
+                    self._write_canonical_routed_action_fixture(
+                        run_root,
+                        stem=f"tamper-{tamper_kind}",
+                    )
+                )
+                output_path = self.repo_root / capture_displays[0].lstrip("/")
+                receipt_path = self.repo_root / capture_displays[1].lstrip("/")
+                if tamper_kind == "action-path":
+                    content = content.replace(
+                        f"/.recursive/run/{self.run_id}/subagents/tamper-action-path.md",
+                        f"/.recursive/run/{self.run_id}/subagents/other.md",
+                    )
+                    self._write(action_path, content)
+                elif tamper_kind == "output":
+                    self._write(output_path, "tampered routed output")
+                else:
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    if tamper_kind == "receipt-output":
+                        receipt["output_text"] = "tampered receipt output"
+                    else:
+                        receipt["prompt_bundle_path"] = (
+                            f"/.recursive/run/{self.run_id}/router-prompts/other.md"
+                        )
+                    self._write(receipt_path, json.dumps(receipt, indent=2))
+                binding = self.harness.routed_action_record_binding(
+                    self.repo_root,
+                    run_root,
+                    action_path,
+                    content,
+                    bindings,
+                )
+                self.assertIsNone(binding)
+
+    def test_evaluate_recursive_run_rejects_symlinked_subagents_directory(self) -> None:
+        run_root = self._write_minimal_complete_recursive_run()
+        self._write(
+            self.repo_root / ".recursive" / "config" / "recursive-router.json",
+            json.dumps(
+                {
+                    "role_routes": {
+                        "planner": {
+                            "enabled": True,
+                            "mode": "external-cli",
+                            "cli": "codex",
+                            "model": "gpt-5.4-mini",
+                            "fallback": "self-audit",
+                        }
+                    },
+                    "cli_overrides": {"codex": {"command": "C:\\codex.exe"}},
+                },
+                indent=2,
+            ),
+        )
+        external_subagents = self.temp_dir / "external-subagents"
+        external_subagents.mkdir()
+        self._write(external_subagents / "external-action.md", "# External action record")
+        subagents_dir = run_root / "subagents"
+        try:
+            subagents_dir.symlink_to(external_subagents, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+        logs_root = self.workspace_root / "kimi" / "recursive-on" / "logs"
+        logs_root.mkdir(parents=True, exist_ok=True)
+        result = self._make_result()
+        result.runner_slug = "kimi"
+        result.runner_name = "Kimi CLI"
+        result.provider_family = "moonshot-kimi"
+        result.model = "kimi-k2.6"
+        self.harness.run_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=rrb.CommandResult(
+                command=["lint"],
+                returncode=0,
+                stdout="lint ok\n",
+                stderr="",
+                duration_seconds=0.5,
+            )
+        )
+        self.harness.routed_action_record_binding = mock.Mock(  # type: ignore[method-assign]
+            return_value=("planner", "codex", "gpt-5.4-mini")
+        )
+
+        self.harness.evaluate_recursive_run(self.repo_root, logs_root, result)
+
+        self.harness.routed_action_record_binding.assert_not_called()
+        self.assertEqual("routed-evidence-missing", result.recursive_workflow_status)
+        self.assertIn("Recursive routed delegation evidence missing: no routed subagent action records were found.", result.issues)
 
     def test_evaluate_recursive_run_rejects_controller_synthesized_self_audit_when_routing_expected(self) -> None:
         run_root = self._write_minimal_complete_recursive_run()
@@ -2236,7 +3182,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             repo_root,
             logs_root,
             runner_slug="kimi",
-            executable="C:\\Users\\erikb\\.local\\bin\\kimi.exe",
+            executable="C:\\Users\\fixture\\.local\\bin\\kimi.exe",
             model="kimi-code/kimi-for-coding",
             prompt_text="Reply with exactly: pong",
             log_stem="kimi",
@@ -2247,7 +3193,7 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
         self.assertEqual(
             captured["command"],
             [
-                "C:\\Users\\erikb\\.local\\bin\\kimi.exe",
+                "C:\\Users\\fixture\\.local\\bin\\kimi.exe",
                 "--config-file",
                 str(temp_config),
                 "--model",
@@ -2421,6 +3367,136 @@ class RecursiveBenchmarkIntegrityTests(unittest.TestCase):
             args = rrb.parse_args()
 
         self.assertEqual(args.codex_model, "gpt-5.4")
+        self.assertTrue(args.provision_dependencies)
+
+    def test_parse_args_supports_skipping_dependency_provisioning(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["run-recursive-benchmark.py", "--skip-dependency-provisioning"],
+        ):
+            args = rrb.parse_args()
+
+        self.assertFalse(args.provision_dependencies)
+
+    def test_powershell_wrapper_forwards_full_python_interface_with_real_pwsh(self) -> None:
+        if os.name == "nt":
+            self.skipTest("Unix executable shim is used for this portable PowerShell parity test.")
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("pwsh is unavailable")
+
+        wrapper_root = self.temp_dir / "benchmark-powershell-wrapper"
+        wrapper_root.mkdir(parents=True)
+        source_wrapper = Path(rrb.__file__).with_suffix(".ps1")
+        wrapper_path = wrapper_root / source_wrapper.name
+        shutil.copy2(source_wrapper, wrapper_path)
+        capture_path = wrapper_root / "forwarded-arguments.json"
+        fake_driver = wrapper_root / "run-recursive-benchmark.py"
+        self._write(
+            fake_driver,
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "import sys",
+                    "from pathlib import Path",
+                    "Path(os.environ['RECURSIVE_BENCHMARK_ARGUMENT_CAPTURE']).write_text(",
+                    "    json.dumps(sys.argv[1:]),",
+                    "    encoding='utf-8',",
+                    ")",
+                ]
+            ),
+        )
+        shim_root = wrapper_root / "bin"
+        shim_root.mkdir()
+        python_shim = shim_root / "python"
+        self._write(
+            python_shim,
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+        )
+        python_shim.chmod(0o755)
+        workspace_arg = str(wrapper_root / "workspace with spaces")
+        environment = os.environ.copy()
+        environment["PATH"] = str(shim_root) + os.pathsep + environment.get("PATH", "")
+        environment["RECURSIVE_BENCHMARK_ARGUMENT_CAPTURE"] = str(capture_path)
+
+        completed = subprocess.run(
+            [
+                pwsh,
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                str(wrapper_path),
+                "-Scenario",
+                "scientific-calculator-rust",
+                "-Runner",
+                "opencode",
+                "-WorkspaceRoot",
+                workspace_arg,
+                "-KimiModel",
+                "kimi-test",
+                "-OpenCodeModel",
+                "opencode/test",
+                "-MaxMinutes",
+                "7",
+                "-CommandTimeout",
+                "123",
+                "-PreviewTimeout",
+                "19",
+                "-NpmCommand",
+                "npm-test",
+                "-ArmMode",
+                "parallel",
+                "-HintPenalty",
+                "6",
+                "-ListScenarios",
+                "-PrepareOnly",
+                "-SkipNpmInstall",
+                "-SkipDependencyProvisioning",
+            ],
+            cwd=wrapper_root,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        forwarded = json.loads(capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [
+                "--scenario",
+                "scientific-calculator-rust",
+                "--runner",
+                "opencode",
+                "--codex-model",
+                "gpt-5.4",
+                "--kimi-model",
+                "kimi-test",
+                "--opencode-model",
+                "opencode/test",
+                "--max-minutes",
+                "7",
+                "--command-timeout",
+                "123",
+                "--preview-timeout",
+                "19",
+                "--npm-command",
+                "npm-test",
+                "--arm-mode",
+                "parallel",
+                "--hint-penalty",
+                "6",
+                "--workspace-root",
+                workspace_arg,
+                "--list-scenarios",
+                "--prepare-only",
+                "--skip-npm-install",
+                "--skip-dependency-provisioning",
+            ],
+            forwarded,
+        )
 
     def test_parse_worktree_location_accepts_generic_location_field(self) -> None:
         text = "\n".join(

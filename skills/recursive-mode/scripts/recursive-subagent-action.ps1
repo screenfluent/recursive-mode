@@ -81,26 +81,26 @@ if ($CliProbeSummary) { $argsList += @("--cli-probe-summary", $CliProbeSummary) 
 if ($PromptBundlePath) { $argsList += @("--prompt-bundle-path", $PromptBundlePath) }
 if ($InvocationExitCode) { $argsList += @("--invocation-exit-code", $InvocationExitCode) }
 
-foreach ($value in @($UpstreamArtifact)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--upstream-artifact", $piece.Trim()) } } }
-foreach ($value in @($Addendum)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--addendum", $piece.Trim()) } } }
-foreach ($value in @($CodeRef)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--code-ref", $piece.Trim()) } } }
-foreach ($value in @($MemoryRef)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--memory-ref", $piece.Trim()) } } }
-foreach ($value in @($AuditQuestion)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--audit-question", $piece.Trim()) } } }
-foreach ($value in @($ActionTaken)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--action-taken", $piece.Trim()) } } }
-foreach ($value in @($CreatedFile)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--created-file", $piece.Trim()) } } }
-foreach ($value in @($ModifiedFile)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--modified-file", $piece.Trim()) } } }
-foreach ($value in @($ReviewedFile)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--reviewed-file", $piece.Trim()) } } }
-foreach ($value in @($UntouchedFile)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--untouched-file", $piece.Trim()) } } }
-foreach ($value in @($ArtifactRead)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--artifact-read", $piece.Trim()) } } }
-foreach ($value in @($ArtifactUpdated)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--artifact-updated", $piece.Trim()) } } }
-foreach ($value in @($EvidenceUsed)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--evidence-used", $piece.Trim()) } } }
+foreach ($value in @($UpstreamArtifact)) { $argsList += @("--upstream-artifact", $value) }
+foreach ($value in @($Addendum)) { $argsList += @("--addendum", $value) }
+foreach ($value in @($CodeRef)) { $argsList += @("--code-ref", $value) }
+foreach ($value in @($MemoryRef)) { $argsList += @("--memory-ref", $value) }
+foreach ($value in @($AuditQuestion)) { if ($value.Trim()) { $argsList += @("--audit-question", $value.Trim()) } }
+foreach ($value in @($ActionTaken)) { if ($value.Trim()) { $argsList += @("--action-taken", $value.Trim()) } }
+foreach ($value in @($CreatedFile)) { $argsList += @("--created-file", $value) }
+foreach ($value in @($ModifiedFile)) { $argsList += @("--modified-file", $value) }
+foreach ($value in @($ReviewedFile)) { $argsList += @("--reviewed-file", $value) }
+foreach ($value in @($UntouchedFile)) { $argsList += @("--untouched-file", $value) }
+foreach ($value in @($ArtifactRead)) { $argsList += @("--artifact-read", $value) }
+foreach ($value in @($ArtifactUpdated)) { $argsList += @("--artifact-updated", $value) }
+foreach ($value in @($EvidenceUsed)) { $argsList += @("--evidence-used", $value) }
 foreach ($value in @($FindingClaim)) { if ($value.Trim()) { $argsList += @("--finding-claim", $value.Trim()) } }
-foreach ($value in @($FindingChange)) { if ($value.Trim()) { $argsList += @("--finding-change", $value.Trim()) } }
+foreach ($value in @($FindingChange)) { $argsList += @("--finding-change", $value) }
 foreach ($value in @($FindingVerification)) { if ($value.Trim()) { $argsList += @("--finding-verification", $value.Trim()) } }
-foreach ($value in @($Finding)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--finding", $piece.Trim()) } } }
-foreach ($value in @($VerificationPath)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--verification-path", $piece.Trim()) } } }
-foreach ($value in @($VerificationItem)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--verification-item", $piece.Trim()) } } }
-foreach ($value in @($OutputCapturePath)) { foreach ($piece in ($value -split ",")) { if ($piece.Trim()) { $argsList += @("--output-capture-path", $piece.Trim()) } } }
+foreach ($value in @($Finding)) { if ($value.Trim()) { $argsList += @("--finding", $value.Trim()) } }
+foreach ($value in @($VerificationPath)) { $argsList += @("--verification-path", $value) }
+foreach ($value in @($VerificationItem)) { if ($value.Trim()) { $argsList += @("--verification-item", $value.Trim()) } }
+foreach ($value in @($OutputCapturePath)) { $argsList += @("--output-capture-path", $value) }
 
 & $python @argsList
 exit $LASTEXITCODE

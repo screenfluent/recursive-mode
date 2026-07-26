@@ -15,6 +15,7 @@ from pathlib import Path
 
 import recursive_review_ledger as review_ledger
 import recursive_review_action as review_action
+import recursive_review_surface as review_surface
 import recursive_phase_rules as phase_rules_registry
 
 
@@ -1089,7 +1090,11 @@ def lint_requirement_disposition_fields(
         elif not changed_paths:
             issues.append(f"Requirement {requirement_id} with Status implemented must cite repo paths in Changed Files")
         else:
-            missing_changed_paths = find_missing_repo_paths(repo_root, sorted(changed_paths))
+            missing_changed_paths = [
+                path
+                for path in find_missing_repo_paths(repo_root, sorted(changed_paths))
+                if path not in actual_changed_scope
+            ]
             if missing_changed_paths:
                 issues.append(f"Requirement {requirement_id} Changed Files path(s) do not exist: {', '.join(missing_changed_paths[:5])}")
             if actual_changed_scope:
@@ -1125,7 +1130,11 @@ def lint_requirement_disposition_fields(
         elif not changed_paths:
             issues.append(f"Requirement {requirement_id} with Status verified must cite repo paths in Changed Files")
         else:
-            missing_changed_paths = find_missing_repo_paths(repo_root, sorted(changed_paths))
+            missing_changed_paths = [
+                path
+                for path in find_missing_repo_paths(repo_root, sorted(changed_paths))
+                if path not in actual_changed_scope
+            ]
             if missing_changed_paths:
                 issues.append(f"Requirement {requirement_id} Changed Files path(s) do not exist: {', '.join(missing_changed_paths[:5])}")
             if actual_changed_scope:
@@ -1648,8 +1657,14 @@ def lint_subagent_action_record_file(
     expected_phase: str | None = None,
     owning_artifact: str | None = None,
 ) -> list[str]:
-    content = file_path.read_text(encoding="utf-8")
     issues: list[str] = []
+    path_validation = review_action.validate_action_record_path(repo_root, run_dir, file_path)
+    if not path_validation.valid or path_validation.path is None:
+        return [f"Unsafe subagent action record path: {issue}" for issue in path_validation.issues]
+    file_path = path_validation.path
+    content, read_issues = review_action.read_action_record_text(file_path)
+    if content is None:
+        return [f"Invalid subagent action record: {issue}" for issue in read_issues]
     issues.extend(
         review_action.validate_action_record(
             repo_root,
@@ -1657,6 +1672,9 @@ def lint_subagent_action_record_file(
             expected_run=run_dir.name,
             expected_phase=expected_phase,
             owning_artifact=owning_artifact,
+            expected_action_record_path=review_action.repo_path_display(
+                (Path(".recursive") / "run" / run_dir.name / "subagents" / file_path.name).as_posix()
+            ),
         ).issues
     )
 
@@ -1685,23 +1703,50 @@ def lint_subagent_action_record_file(
     if run_id and run_id != run_dir.name:
         issues.append(f"Run ID mismatch: {run_id} != {run_dir.name}")
 
-    current_artifact = normalize_repo_path(get_md_field_value(inputs, "Current Artifact") or "")
+    current_artifact_value = trim_md_value(get_md_field_value(inputs, "Current Artifact") or "")
+    current_artifact = (
+        normalize_repo_path(current_artifact_value)
+        if current_artifact_value not in {"", "none"}
+        else ""
+    )
+    current_artifact_content: str | None = None
     if not current_artifact:
         issues.append("Inputs Provided is missing Current Artifact")
-    elif not (repo_root / current_artifact).exists():
-        issues.append(f"Current Artifact does not exist: {current_artifact}")
+    else:
+        current_artifact_content, _artifact_path, artifact_read_issues = (
+            review_action.read_confined_repo_text(repo_root, current_artifact_value)
+        )
+        if current_artifact_content is None:
+            issues.extend(
+                f"Current Artifact is unsafe or unreadable: {issue}"
+                for issue in artifact_read_issues
+            )
 
     artifact_hash = trim_md_value(get_md_field_value(inputs, "Artifact Content Hash") or "")
-    if current_artifact and (repo_root / current_artifact).exists():
-        current_artifact_hash = content_sha256((repo_root / current_artifact).read_text(encoding="utf-8"))
+    if current_artifact_content is not None:
+        current_artifact_hash = content_sha256(current_artifact_content)
         if not artifact_hash:
             issues.append("Inputs Provided is missing Artifact Content Hash")
         elif artifact_hash != current_artifact_hash:
             issues.append("Inputs Provided Artifact Content Hash does not match the current artifact content")
 
-    review_bundle = normalize_repo_path(get_md_field_value(inputs, "Review Bundle") or "")
-    if review_bundle and not (repo_root / review_bundle).exists():
-        issues.append(f"Review Bundle does not exist: {review_bundle}")
+    review_bundle_value = trim_md_value(get_md_field_value(inputs, "Review Bundle") or "")
+    review_bundle = (
+        normalize_repo_path(review_bundle_value)
+        if review_bundle_value not in {"", "none"}
+        else ""
+    )
+    bundle_content: str | None = None
+    if review_bundle:
+        bundle_content, _bundle_path, bundle_read_issues = review_action.read_confined_repo_text(
+            repo_root,
+            review_bundle_value,
+        )
+        if bundle_content is None:
+            issues.extend(
+                f"Review Bundle is unsafe or unreadable: {issue}"
+                for issue in bundle_read_issues
+            )
 
     diff_basis_text = get_md_field_value(inputs, "Diff Basis") or ""
     if not diff_basis_text.strip():
@@ -1758,24 +1803,36 @@ def lint_subagent_action_record_file(
                 f"Claimed modified/created files are not present in the current diff: {', '.join(sorted(missing_changed_claims)[:5])}"
             )
 
-    if review_bundle and (repo_root / review_bundle).exists():
-        bundle_content = (repo_root / review_bundle).read_text(encoding="utf-8")
+    if review_bundle and bundle_content is not None:
         bundle_artifact_path = normalize_repo_path(get_md_field_value(bundle_content, "Artifact Path") or "")
-        bundle_upstream_artifacts = {
-            normalize_repo_path(path)
-            for path in extract_paths_from_text(get_heading_body(bundle_content, "Upstream Artifacts To Re-read"))
-            if normalize_repo_path(path)
-        }
-        bundle_changed_paths = {
-            normalize_repo_path(path)
-            for path in extract_paths_from_text(get_heading_body(bundle_content, "Changed Files Reviewed"))
-            if normalize_repo_path(path)
-        }
-        bundle_code_refs = {
-            normalize_repo_path(path)
-            for path in extract_paths_from_text(get_heading_body(bundle_content, "Targeted Code References"))
-            if normalize_repo_path(path)
-        }
+        try:
+            bundle_upstream_artifacts = set(
+                review_surface.parse_markdown_list(
+                    get_heading_body(bundle_content, "Upstream Artifacts To Re-read")
+                )
+            )
+        except ValueError as error:
+            issues.append(f"Review bundle Upstream Artifacts To Re-read is malformed: {error}")
+            bundle_upstream_artifacts = set()
+        bundle_snapshot, bundle_surface_issues = review_surface.parse(bundle_content)
+        if bundle_snapshot is None:
+            issues.extend(f"Review bundle surface snapshot: {issue}" for issue in bundle_surface_issues)
+            bundle_changed_paths: set[str] = set()
+        else:
+            bundle_changed_paths = {
+                str(record["path"])
+                for record in bundle_snapshot.get("changed", [])
+                if isinstance(record, dict) and "path" in record
+            }
+        try:
+            bundle_code_refs = set(
+                review_surface.parse_markdown_list(
+                    get_heading_body(bundle_content, "Targeted Code References")
+                )
+            )
+        except ValueError as error:
+            issues.append(f"Review bundle Targeted Code References is malformed: {error}")
+            bundle_code_refs = set()
         allowed_artifacts = {path for path in {bundle_artifact_path, *bundle_upstream_artifacts} if path}
         if current_artifact and allowed_artifacts and current_artifact not in allowed_artifacts:
             issues.append(
@@ -1889,6 +1946,14 @@ def lint_subagent_contribution_verification(
     all_action_record_paths = get_all_subagent_action_record_paths(content)
     audit_context = get_heading_body(content, "Audit Context")
     audit_mode = get_md_field_value(audit_context, "Audit Execution Mode") or ""
+    subagents_dir = run_dir / "subagents"
+    if action_record_paths or audit_mode == "subagent" or subagents_dir.exists() or subagents_dir.is_symlink():
+        directory_validation = review_action.validate_action_record_path(repo_root, run_dir)
+        if not directory_validation.valid:
+            issues.extend(
+                f"Unsafe subagent action record path: {issue}"
+                for issue in directory_validation.issues
+            )
     current_phase = get_md_field_value(content, "Phase") or ""
     reviewed_action_records_field = get_named_field_text(body, "Reviewed Action Records") or ""
     main_agent_verification = get_named_field_text(body, "Main-Agent Verification Performed") or ""
@@ -1910,8 +1975,15 @@ def lint_subagent_contribution_verification(
         or get_md_field_value(content, "Review Bundle Path")
         or ""
     )
-    if audit_mode == "subagent" and not action_record_paths:
-        issues.append("Audit Execution Mode subagent requires at least one reviewed subagent action record")
+    review_metadata = get_heading_body(content, "Review Metadata")
+    current_ledger_path = normalize_repo_path(get_md_field_value(review_metadata, "Review Ledger Path") or "")
+    current_review_pass = review_action.review_pass_from_bundle_path(current_bundle_path)
+    reviewed_record_paths = {
+        normalize_repo_path(path)
+        for path in extract_paths_from_field_value(reviewed_action_records_field)
+        if normalize_repo_path(path).startswith(f".recursive/run/{run_dir.name}/subagents/")
+    }
+    qualifying_review_records: set[str] = set()
     out_of_run_action_records = sorted(path for path in all_action_record_paths if path not in action_record_paths)
     if out_of_run_action_records:
         issues.append(
@@ -1919,11 +1991,6 @@ def lint_subagent_contribution_verification(
             + ", ".join(out_of_run_action_records[:5])
         )
     if action_record_paths:
-        reviewed_record_paths = {
-            normalize_repo_path(path)
-            for path in extract_paths_from_field_value(reviewed_action_records_field)
-            if normalize_repo_path(path).startswith(f".recursive/run/{run_dir.name}/subagents/")
-        }
         if not reviewed_action_records_field.strip():
             issues.append("Subagent Contribution Verification must record Reviewed Action Records")
         else:
@@ -1959,10 +2026,40 @@ def lint_subagent_contribution_verification(
                 )
 
     for action_record_path in action_record_paths:
-        if not (repo_root / action_record_path).exists():
-            issues.append(f"Referenced subagent action record does not exist: {action_record_path}")
+        path_validation = review_action.validate_action_record_path(repo_root, run_dir, action_record_path)
+        if not path_validation.valid or path_validation.path is None:
+            issues.extend(
+                f"Unsafe subagent action record path: {action_record_path} -> {issue}"
+                for issue in path_validation.issues
+            )
             continue
-        action_content = (repo_root / action_record_path).read_text(encoding="utf-8")
+        action_path = path_validation.path
+        action_content, read_issues = review_action.read_action_record_text(action_path)
+        if action_content is None:
+            issues.extend(
+                f"Invalid subagent action record: {action_record_path} -> {issue}"
+                for issue in read_issues
+            )
+            continue
+        if action_record_path in reviewed_record_paths and review_action.is_review_audit_action(action_content):
+            review_result = review_action.validate_review_audit_action_record(
+                repo_root,
+                action_content,
+                expected_run=run_dir.name,
+                expected_phase=current_phase,
+                owning_artifact=file_path.name,
+                expected_review_bundle=current_bundle_path,
+                expected_review_ledger=current_ledger_path,
+                expected_review_pass=current_review_pass,
+                expected_action_record_path=review_action.repo_path_display(action_record_path),
+            )
+            if review_result.valid:
+                qualifying_review_records.add(action_record_path)
+            else:
+                issues.extend(
+                    f"Subagent review/audit action record is not bound to the owning phase: {action_record_path} -> {issue}"
+                    for issue in review_result.issues
+                )
         action_phase = get_md_field_value(get_heading_body(action_content, "Metadata"), "Phase") or ""
         action_claims = parse_subagent_action_record_claims(action_content)
         if current_phase and action_phase and current_phase != action_phase:
@@ -1975,7 +2072,7 @@ def lint_subagent_contribution_verification(
                 )
         issues.extend(
             lint_subagent_action_record_file(
-                repo_root / action_record_path,
+                action_path,
                 repo_root,
                 run_dir,
                 actual_changed_files,
@@ -2011,6 +2108,11 @@ def lint_subagent_contribution_verification(
                     "Main-Agent Verification Performed must cite the reviewed artifact, bundle, or upstream recursive artifacts used to accept delegated work"
                 )
 
+    if audit_mode == "subagent" and (acceptance_decision != "accepted" or not qualifying_review_records):
+        issues.append(
+            "Audit Execution Mode subagent requires at least one accepted review/audit action record bound to the current protocol, phase, ledger, bundle, and pass"
+        )
+
     return sorted(set(issues))
 
 
@@ -2040,11 +2142,17 @@ def lint_review_bundle_reference(content: str, run_dir: Path, repo_root: Path) -
         issues.append(f"Review Bundle Path must live under `/{expected_prefix}`")
         return issues
 
-    if not (repo_root / normalized_bundle_path).exists():
-        issues.append(f"Review Bundle Path does not exist: {normalized_bundle_path}")
+    bundle_content, _bundle_file, bundle_read_issues = review_action.read_confined_repo_text(
+        repo_root,
+        trim_md_value(bundle_path),
+    )
+    if bundle_content is None:
+        issues.extend(
+            f"Review Bundle Path is unsafe or unreadable: {issue}"
+            for issue in bundle_read_issues
+        )
         return issues
 
-    bundle_content = (repo_root / normalized_bundle_path).read_text(encoding="utf-8")
     artifact_path = normalize_repo_path(get_md_field_value(bundle_content, "Artifact Path") or "")
     artifact_hash = trim_md_value(get_md_field_value(bundle_content, "Artifact Content Hash") or "")
     if not artifact_path:
@@ -2070,18 +2178,55 @@ def lint_review_bundle_reference(content: str, run_dir: Path, repo_root: Path) -
     if missing_bundle_headings:
         issues.append(f"Review bundle is missing required section(s): {', '.join(missing_bundle_headings)}")
 
-    ledger_path = normalize_repo_path(get_md_field_value(review_metadata, "Review Ledger Path") or "")
+    ledger_value = trim_md_value(get_md_field_value(review_metadata, "Review Ledger Path") or "")
+    ledger_path = normalize_repo_path(ledger_value)
     ledger_scope = ""
-    if ledger_path and (repo_root / ledger_path).is_file():
-        ledger_scope = get_heading_body((repo_root / ledger_path).read_text(encoding="utf-8"), "Review Scope")
+    if ledger_path:
+        ledger_content, _ledger_file, ledger_read_issues = review_action.read_confined_repo_text(
+            repo_root,
+            ledger_value,
+        )
+        if ledger_content is None:
+            issues.extend(
+                f"Review Ledger Path is unsafe or unreadable: {issue}"
+                for issue in ledger_read_issues
+            )
+        else:
+            ledger_scope = get_heading_body(ledger_content, "Review Scope")
     cited_paths = {normalize_repo_path(path) for path in extract_paths_from_text(content)}
     cited_review_paths = {normalize_repo_path(path) for path in extract_paths_from_text(ledger_scope)}
-    upstream_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Upstream Artifacts To Re-read"))}
-    addenda_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Relevant Addenda"))}
-    prior_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Prior Recursive Evidence"))}
-    changed_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Changed Files Reviewed"))}
-    code_ref_paths = {normalize_repo_path(path) for path in extract_paths_from_text(get_heading_body(bundle_content, "Targeted Code References"))}
-    audit_questions = get_heading_body(bundle_content, "Audit Questions")
+    decoded_lists: dict[str, list[str]] = {}
+    for heading in (
+        "Upstream Artifacts To Re-read",
+        "Relevant Addenda",
+        "Prior Recursive Evidence",
+        "Control-Plane Docs",
+        "Targeted Code References",
+        "Evidence References",
+        "Audit Questions",
+    ):
+        body = get_heading_body(bundle_content, heading)
+        if not body:
+            decoded_lists[heading] = []
+            continue
+        try:
+            decoded_lists[heading] = review_surface.parse_markdown_list(body)
+        except ValueError as error:
+            issues.append(f"Review bundle {heading} is malformed: {error}")
+            decoded_lists[heading] = []
+    upstream_paths = set(decoded_lists["Upstream Artifacts To Re-read"])
+    addenda_paths = set(decoded_lists["Relevant Addenda"])
+    prior_paths = set(decoded_lists["Prior Recursive Evidence"])
+    code_ref_paths = set(decoded_lists["Targeted Code References"])
+    snapshot, surface_issues = review_surface.parse(bundle_content)
+    issues.extend(f"Review bundle surface snapshot: {issue}" for issue in surface_issues)
+    changed_states = {
+        str(record["path"]): str(record["state"])
+        for record in (snapshot or {}).get("changed", [])
+        if isinstance(record, dict) and "path" in record and "state" in record
+    }
+    changed_paths = set(changed_states)
+    audit_questions = "\n".join(decoded_lists["Audit Questions"])
     if is_placeholder_only(audit_questions):
         issues.append("Review bundle Audit Questions cannot be placeholder-only")
     diff_basis_body = get_heading_body(bundle_content, "Diff Basis")
@@ -2091,16 +2236,28 @@ def lint_review_bundle_reference(content: str, run_dir: Path, repo_root: Path) -
     if not changed_paths:
         issues.append("Review bundle Changed Files Reviewed cannot be empty")
     else:
-        missing_changed_paths = find_missing_repo_paths(repo_root, sorted(changed_paths))
+        missing_changed_paths = [
+            path
+            for path in find_missing_repo_paths(repo_root, sorted(changed_paths))
+            if changed_states.get(path) != "missing"
+        ]
         if missing_changed_paths:
-            issues.append(f"Review bundle changed file path(s) do not exist: {', '.join(missing_changed_paths[:5])}")
+            issues.append(
+                "Review bundle changed file path(s) are absent without a matching missing-state surface record: "
+                + ", ".join(missing_changed_paths[:5])
+            )
     if not code_ref_paths:
         issues.append("Review bundle Targeted Code References cannot be empty")
     else:
-        missing_code_refs = find_missing_repo_paths(repo_root, sorted(code_ref_paths))
-        if missing_code_refs:
-            issues.append(f"Review bundle code ref path(s) do not exist: {', '.join(missing_code_refs[:5])}")
-        elif changed_paths and not any(path in changed_paths for path in code_ref_paths):
+        non_regular_code_refs = [
+            path
+            for path in sorted(code_ref_paths)
+            if not (repo_root / path).is_file() or (repo_root / path).is_symlink()
+        ]
+        if non_regular_code_refs:
+            issues.append(f"Review bundle code ref path(s) must be regular files: {', '.join(non_regular_code_refs[:5])}")
+        regular_changed_paths = {path for path in changed_paths if changed_states.get(path) == "file"}
+        if not non_regular_code_refs and regular_changed_paths and not regular_changed_paths.intersection(code_ref_paths):
             issues.append("Review bundle Targeted Code References do not overlap the changed-file scope")
     expected_addenda = set(get_expected_effective_input_addenda_paths(run_dir, "03.5-code-review.md"))
     missing_bundle_addenda = sorted(path for path in expected_addenda if path not in addenda_paths)
@@ -2944,12 +3101,18 @@ def main() -> None:
                 total_warn += warn_count
 
         subagents_dir = run_dir / "subagents"
-        if subagents_dir.exists():
-            for action_record in sorted(subagents_dir.glob("*.md")):
-                issues = lint_subagent_action_record_file(action_record, repo_root, run_dir, actual_changed_files)
-                for issue in issues:
+        if subagents_dir.exists() or subagents_dir.is_symlink():
+            directory_validation = review_action.validate_action_record_path(repo_root, run_dir)
+            if not directory_validation.valid or directory_validation.path is None:
+                for issue in directory_validation.issues:
                     total_fail += 1
-                    write_issue("FAIL", action_record, issue)
+                    write_issue("FAIL", subagents_dir, f"Unsafe subagent action record path: {issue}")
+            else:
+                for action_record in sorted(directory_validation.path.glob("*.md")):
+                    issues = lint_subagent_action_record_file(action_record, repo_root, run_dir, actual_changed_files)
+                    for issue in issues:
+                        total_fail += 1
+                        write_issue("FAIL", action_record, issue)
 
         # Phase-sequence prerequisite check: if a later artifact exists, all
         # earlier phases that also exist must already be LOCKED.  This catches

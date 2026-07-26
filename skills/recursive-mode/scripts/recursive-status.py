@@ -16,6 +16,7 @@ from pathlib import Path
 
 import recursive_phase_rules as phase_rules_registry
 import recursive_review_action as review_action
+import recursive_review_surface as review_surface
 
 
 AUDITED_PHASE_FILES = phase_rules_registry.AUDITED_ARTIFACTS
@@ -675,7 +676,11 @@ def collect_requirement_disposition_blockers(
         elif not changed_paths:
             blockers.append(f"Requirement {requirement_id} with Status implemented must cite repo paths in Changed Files")
         else:
-            missing_changed_paths = find_missing_repo_paths(repo_root, sorted(changed_paths))
+            missing_changed_paths = [
+                path
+                for path in find_missing_repo_paths(repo_root, sorted(changed_paths))
+                if path not in actual_changed_scope
+            ]
             if missing_changed_paths:
                 blockers.append(f"Requirement {requirement_id} Changed Files path(s) do not exist: {', '.join(missing_changed_paths[:5])}")
             if actual_changed_scope:
@@ -711,7 +716,11 @@ def collect_requirement_disposition_blockers(
         elif not changed_paths:
             blockers.append(f"Requirement {requirement_id} with Status verified must cite repo paths in Changed Files")
         else:
-            missing_changed_paths = find_missing_repo_paths(repo_root, sorted(changed_paths))
+            missing_changed_paths = [
+                path
+                for path in find_missing_repo_paths(repo_root, sorted(changed_paths))
+                if path not in actual_changed_scope
+            ]
             if missing_changed_paths:
                 blockers.append(f"Requirement {requirement_id} Changed Files path(s) do not exist: {', '.join(missing_changed_paths[:5])}")
             if actual_changed_scope:
@@ -983,8 +992,14 @@ def collect_subagent_contribution_blockers(
     action_record_paths = get_subagent_action_record_paths(content, run_dir)
     all_action_record_paths = get_all_subagent_action_record_paths(content)
     audit_mode = get_md_field_value(get_heading_body(content, "Audit Context"), "Audit Execution Mode") or ""
-    if audit_mode == "subagent" and not action_record_paths:
-        blockers.append("Audit Execution Mode subagent requires at least one reviewed subagent action record")
+    subagents_dir = run_dir / "subagents"
+    if action_record_paths or audit_mode == "subagent" or subagents_dir.exists() or subagents_dir.is_symlink():
+        directory_validation = review_action.validate_action_record_path(repo_root, run_dir)
+        if not directory_validation.valid:
+            blockers.extend(
+                f"Unsafe subagent action record path: {issue}"
+                for issue in directory_validation.issues
+            )
     out_of_run_action_records = sorted(path for path in all_action_record_paths if path not in action_record_paths)
     if out_of_run_action_records:
         blockers.append(
@@ -1013,12 +1028,50 @@ def collect_subagent_contribution_blockers(
         for path in extract_paths_from_field_value(repair_performed)
         if normalize_repo_path(path)
     }
+    review_metadata = get_heading_body(content, "Review Metadata")
+    current_ledger_path = normalize_repo_path(get_md_field_value(review_metadata, "Review Ledger Path") or "")
+    current_review_pass = review_action.review_pass_from_bundle_path(current_bundle_path)
+    reviewed_record_paths = {
+        normalize_repo_path(path)
+        for path in extract_paths_from_field_value(reviewed_action_records_field)
+        if normalize_repo_path(path).startswith(f".recursive/run/{run_dir.name}/subagents/")
+    }
+    qualifying_review_records: set[str] = set()
     for action_record_path in action_record_paths:
-        action_path = repo_root / action_record_path
-        if not action_path.exists():
-            blockers.append(f"Referenced subagent action record does not exist: {action_record_path}")
+        path_validation = review_action.validate_action_record_path(repo_root, run_dir, action_record_path)
+        if not path_validation.valid or path_validation.path is None:
+            blockers.extend(
+                f"Unsafe subagent action record path: {action_record_path} -> {issue}"
+                for issue in path_validation.issues
+            )
             continue
-        action_content = action_path.read_text(encoding="utf-8")
+        action_path = path_validation.path
+        action_content, read_issues = review_action.read_action_record_text(action_path)
+        if action_content is None:
+            blockers.extend(
+                f"Invalid subagent action record: {action_record_path} -> {issue}"
+                for issue in read_issues
+            )
+            continue
+        if action_record_path in reviewed_record_paths and review_action.is_review_audit_action(action_content):
+            review_result = review_action.validate_review_audit_action_record(
+                repo_root,
+                action_content,
+                expected_run=run_dir.name,
+                expected_phase=current_phase,
+                owning_artifact=file_name,
+                expected_review_bundle=current_bundle_path,
+                expected_review_ledger=current_ledger_path,
+                expected_review_pass=current_review_pass,
+                expected_action_record_path=review_action.repo_path_display(action_record_path),
+            )
+            if review_result.valid:
+                qualifying_review_records.add(action_record_path)
+            else:
+                blockers.extend(
+                    f"Subagent review/audit action record is not bound to the owning phase: {action_record_path} -> {issue}"
+                    for issue in review_result.issues
+                )
         blockers.extend(
             review_action.validate_action_record(
                 repo_root,
@@ -1026,6 +1079,7 @@ def collect_subagent_contribution_blockers(
                 expected_run=run_dir.name,
                 expected_phase=current_phase,
                 owning_artifact=file_name,
+                expected_action_record_path=review_action.repo_path_display(action_record_path),
             ).issues
         )
         action_claims = parse_subagent_action_record_claims(action_content)
@@ -1046,14 +1100,27 @@ def collect_subagent_contribution_blockers(
             blockers.append(f"Subagent action record run mismatch: {action_record_path}")
         if current_phase and (get_md_field_value(metadata, "Phase") or "") not in {"", current_phase}:
             blockers.append(f"Subagent action record phase mismatch: {action_record_path}")
-        current_artifact = normalize_repo_path(get_md_field_value(inputs, "Current Artifact") or "")
+        current_artifact_value = trim_md_value(get_md_field_value(inputs, "Current Artifact") or "")
+        current_artifact = (
+            normalize_repo_path(current_artifact_value)
+            if current_artifact_value not in {"", "none"}
+            else ""
+        )
+        current_artifact_content: str | None = None
         if not current_artifact:
             blockers.append(f"Subagent action record missing Current Artifact: {action_record_path}")
-        elif not (repo_root / current_artifact).exists():
-            blockers.append(f"Subagent action record Current Artifact does not exist: {action_record_path}")
+        else:
+            current_artifact_content, _artifact_path, artifact_read_issues = (
+                review_action.read_confined_repo_text(repo_root, current_artifact_value)
+            )
+            if current_artifact_content is None:
+                blockers.extend(
+                    f"Subagent action record Current Artifact is unsafe or unreadable: {action_record_path} -> {issue}"
+                    for issue in artifact_read_issues
+                )
         artifact_hash = trim_md_value(get_md_field_value(inputs, "Artifact Content Hash") or "")
-        if current_artifact and (repo_root / current_artifact).exists():
-            current_artifact_hash = content_sha256((repo_root / current_artifact).read_text(encoding="utf-8"))
+        if current_artifact_content is not None:
+            current_artifact_hash = content_sha256(current_artifact_content)
             if not artifact_hash:
                 blockers.append(f"Subagent action record missing Artifact Content Hash: {action_record_path}")
             elif artifact_hash != current_artifact_hash:
@@ -1108,27 +1175,62 @@ def collect_subagent_contribution_blockers(
                 blockers.append(
                     f"Subagent action record references missing evidence: {action_record_path} -> {', '.join(missing_evidence_refs[:5])}"
                 )
-        action_bundle_path = normalize_repo_path(get_md_field_value(inputs, "Review Bundle") or "")
+        action_bundle_value = trim_md_value(get_md_field_value(inputs, "Review Bundle") or "")
+        action_bundle_path = (
+            normalize_repo_path(action_bundle_value)
+            if action_bundle_value not in {"", "none"}
+            else ""
+        )
         if current_bundle_path and action_bundle_path and current_bundle_path != action_bundle_path:
             blockers.append(f"Subagent action record review bundle mismatch: {action_record_path}")
-        if action_bundle_path and (repo_root / action_bundle_path).exists():
-            bundle_content = (repo_root / action_bundle_path).read_text(encoding="utf-8")
+        bundle_content: str | None = None
+        if action_bundle_path:
+            bundle_content, _bundle_path, bundle_read_issues = review_action.read_confined_repo_text(
+                repo_root,
+                action_bundle_value,
+            )
+            if bundle_content is None:
+                blockers.extend(
+                    f"Subagent action record Review Bundle is unsafe or unreadable: {action_record_path} -> {issue}"
+                    for issue in bundle_read_issues
+                )
+        if action_bundle_path and bundle_content is not None:
             bundle_artifact_path = normalize_repo_path(get_md_field_value(bundle_content, "Artifact Path") or "")
-            bundle_upstream_artifacts = {
-                normalize_repo_path(path)
-                for path in extract_paths_from_text(get_heading_body(bundle_content, "Upstream Artifacts To Re-read"))
-                if normalize_repo_path(path)
-            }
-            bundle_changed_paths = {
-                normalize_repo_path(path)
-                for path in extract_paths_from_text(get_heading_body(bundle_content, "Changed Files Reviewed"))
-                if normalize_repo_path(path)
-            }
-            bundle_code_refs = {
-                normalize_repo_path(path)
-                for path in extract_paths_from_text(get_heading_body(bundle_content, "Targeted Code References"))
-                if normalize_repo_path(path)
-            }
+            try:
+                bundle_upstream_artifacts = set(
+                    review_surface.parse_markdown_list(
+                        get_heading_body(bundle_content, "Upstream Artifacts To Re-read")
+                    )
+                )
+            except ValueError as error:
+                blockers.append(
+                    f"Subagent action record Review Bundle Upstream Artifacts To Re-read is malformed: {action_record_path} -> {error}"
+                )
+                bundle_upstream_artifacts = set()
+            bundle_snapshot, bundle_surface_issues = review_surface.parse(bundle_content)
+            if bundle_snapshot is None:
+                blockers.extend(
+                    f"Subagent action record Review Bundle surface snapshot is malformed: {action_record_path} -> {issue}"
+                    for issue in bundle_surface_issues
+                )
+                bundle_changed_paths: set[str] = set()
+            else:
+                bundle_changed_paths = {
+                    str(record["path"])
+                    for record in bundle_snapshot.get("changed", [])
+                    if isinstance(record, dict) and "path" in record
+                }
+            try:
+                bundle_code_refs = set(
+                    review_surface.parse_markdown_list(
+                        get_heading_body(bundle_content, "Targeted Code References")
+                    )
+                )
+            except ValueError as error:
+                blockers.append(
+                    f"Subagent action record Review Bundle Targeted Code References is malformed: {action_record_path} -> {error}"
+                )
+                bundle_code_refs = set()
             allowed_artifacts = {path for path in {bundle_artifact_path, *bundle_upstream_artifacts} if path}
             if current_artifact and allowed_artifacts and current_artifact not in allowed_artifacts:
                 blockers.append(
@@ -1181,11 +1283,6 @@ def collect_subagent_contribution_blockers(
                 )
 
     if action_record_paths:
-        reviewed_record_paths = {
-            normalize_repo_path(path)
-            for path in extract_paths_from_field_value(reviewed_action_records_field)
-            if normalize_repo_path(path).startswith(f".recursive/run/{run_dir.name}/subagents/")
-        }
         if not reviewed_action_records_field.strip():
             blockers.append("Subagent Contribution Verification must record Reviewed Action Records")
         else:
@@ -1219,6 +1316,11 @@ def collect_subagent_contribution_blockers(
                     "Repair Performed After Verification references missing path(s): "
                     + ", ".join(missing_repair_paths[:5])
                 )
+
+    if audit_mode == "subagent" and (acceptance_decision != "accepted" or not qualifying_review_records):
+        blockers.append(
+            "Audit Execution Mode subagent requires at least one accepted review/audit action record bound to the current protocol, phase, ledger, bundle, and pass"
+        )
 
     return sorted(set(blockers))
 

@@ -5,7 +5,7 @@ description: "Shape delivery DAGs across Recursive runs. Use to split an approve
 
 # Recursive Delivery Slicing
 
-Turn one approved multi-run specification into complete tracer-bullet slices, then keep their cross-run dependency graph honest. Load [references/delivery-contract.md](references/delivery-contract.md) before reading or writing a delivery.
+Turn one approved multi-run specification into complete tracer-bullet slices, then keep their cross-run dependency graph honest. `recursive-spec` owns the approved requirements content; this skill materializes that content unchanged with the approved delivery tree and owns only its slices, edges, and DAG state. Load [references/delivery-contract.md](references/delivery-contract.md) before reading or writing a delivery.
 
 ## Choose one branch
 
@@ -22,6 +22,8 @@ Read the approved delivery-spec draft, governing repository instructions, domain
 Present a numbered proposal with each slice's outcome and blockers. Ask the human whether the granularity feels right, every blocker genuinely gates its dependent slice, and any slices should merge or split. Require approval of the split and every edge; conversational answers such as `yes`, `continue`, and `stop` are sufficient. Create no delivery artifact from an unapproved proposal.
 
 Complete when the approved files match the proposal and every slice is either on the frontier or blocked by an incomplete prerequisite, with every delivery requirement covered by at least one slice.
+
+When creating the tree, persist the `recursive-spec`-approved requirements content as `spec.md` without editing it. Shape may derive slice coverage and topology from that content, but must route any requirement-content correction back through `recursive-spec`.
 
 ## Resume a delivery
 
@@ -47,4 +49,4 @@ After the run exists, record its pointer and set that slice `active` before the 
 
 Complete handoff when the run requirements cite the source delivery and slice, the manifest records the selected slice as active, and this handoff started no second run.
 
-This skill owns the cross-run DAG and never dispatches a run. It stops after reporting the frontier; the user's later `continue` starts the next handoff. Wayfinder retains discovery, each Recursive run retains implementation, and external request triage retains tracker policy.
+This skill owns the cross-run DAG and never authors or amends requirements or dispatches a run. It stops after reporting the frontier; the user's later `continue` starts the next handoff. Wayfinder retains discovery, `recursive-spec` retains requirements content, each Recursive run retains implementation, and external request triage retains tracker policy.

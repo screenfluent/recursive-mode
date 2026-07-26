@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import re
 import stat
@@ -18,13 +19,87 @@ TRANSIENT_NAMES = {".ds_store", "thumbs.db"}
 TRANSIENT_SUFFIXES = (".pyc", ".pyo", ".pyd")
 SNAPSHOT_KEYS = {"profile", "run_id", "baseline", "comparison", "changed", "references"}
 RECORD_KEYS = {"path", "state", "mode", "sha256"}
+MARKDOWN_ATOM_PREFIX = "json:"
+
+
+def _missing_record(path: str) -> dict[str, str]:
+    return {"path": path, "state": "missing", "mode": "none", "sha256": "none"}
+
+
+def _is_reparse_point(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
+def render_markdown_atom(value: str) -> str:
+    """Render one arbitrary string as a canonical, single-line Markdown atom."""
+    if not isinstance(value, str):
+        raise ValueError("Markdown atom value must be a string")
+    return MARKDOWN_ATOM_PREFIX + json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def parse_markdown_atom(value: str) -> str:
+    """Decode one canonical atom without permitting raw Markdown fallback."""
+    if not value.startswith(MARKDOWN_ATOM_PREFIX):
+        raise ValueError(f"Markdown atom must start with {MARKDOWN_ATOM_PREFIX}")
+    payload = value[len(MARKDOWN_ATOM_PREFIX):]
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Markdown atom contains invalid JSON: {exc}") from exc
+    if not isinstance(decoded, str) or render_markdown_atom(decoded) != value:
+        raise ValueError("Markdown atom must be a canonical JSON string")
+    return decoded
+
+
+def render_markdown_list(values: list[str]) -> list[str]:
+    """Render a strict list; ``none`` is reserved for the empty-list sentinel."""
+    if not values:
+        return ["- none"]
+    return [f"- {render_markdown_atom(value)}" for value in values]
+
+
+def parse_markdown_list(body: str) -> list[str]:
+    """Parse the exact output of :func:`render_markdown_list`."""
+    lines = body.splitlines()
+    if lines == ["- none"]:
+        return []
+    if not lines or any(not line.startswith("- ") for line in lines):
+        raise ValueError("Markdown list must contain exact '- json:<JSON string>' items")
+    if any(line == "- none" for line in lines):
+        raise ValueError("Markdown list cannot mix the empty sentinel with values")
+    return [parse_markdown_atom(line[2:]) for line in lines]
+
+
+def _validate_canonical_path(value: str) -> str:
+    if (
+        not value
+        or value.startswith("/")
+        or ntpath.splitdrive(value)[0]
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError(f"invalid repository path or path escape: {value}")
+    return value
 
 
 def normalize_path(value: str) -> str:
-    candidate = value.replace("\\", "/").strip().lstrip("/")
-    if not candidate or candidate.startswith("../") or "/../" in candidate or candidate == "..":
-        raise ValueError(f"invalid repository path: {value}")
-    return candidate
+    """Normalize a user/document path, without rewriting POSIX backslashes."""
+    candidate = value.strip()
+    if os.name == "nt":
+        candidate = candidate.replace("\\", "/")
+    if candidate.startswith("/") and not candidate.startswith("//"):
+        candidate = candidate[1:]
+    return _validate_canonical_path(candidate)
+
+
+def git_path(value: str) -> str:
+    """Validate one lossless path emitted by a NUL-delimited Git command."""
+    return _validate_canonical_path(value)
 
 
 def is_transient(path: str) -> bool:
@@ -54,31 +129,72 @@ def changed_paths(repo_root: Path, baseline: str, comparison: str, run_id: str) 
     tracked = _git_z(repo_root, "diff", "--name-only", "-z", diff_range, "--")
     untracked = _git_z(repo_root, "ls-files", "--others", "--exclude-standard", "-z") if comparison == "working-tree" else []
     run_prefix = f".recursive/run/{run_id}/"
-    result = {
-        normalize_path(path)
-        for path in tracked + untracked
-        if not normalize_path(path).startswith(run_prefix) and not is_transient(normalize_path(path))
-    }
+    result: set[str] = set()
+    for raw_path in tracked + untracked:
+        path = git_path(raw_path)
+        if not path.startswith(run_prefix) and not is_transient(path):
+            result.add(path)
     return sorted(result)
 
 
-def path_record(repo_root: Path, raw_path: str) -> dict[str, str]:
-    path = normalize_path(raw_path)
-    target = repo_root / path
-    try:
-        target.parent.resolve().relative_to(repo_root.resolve())
-    except ValueError as exc:
-        raise ValueError(f"reviewed surface path escapes repository: {path}") from exc
-    try:
-        metadata = target.lstat()
-    except FileNotFoundError:
-        return {"path": path, "state": "missing", "mode": "none", "sha256": "none"}
+def path_record(repo_root: Path, raw_path: str, *, from_git: bool = False) -> dict[str, str]:
+    path = git_path(raw_path) if from_git else normalize_path(raw_path)
+    target = repo_root
+    metadata: os.stat_result | None = None
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        target = target / part
+        try:
+            metadata = target.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return _missing_record(path)
+        except OSError as exc:
+            raise ValueError(f"unable to inspect reviewed surface path {path}: {exc}") from exc
+        if index != len(parts) - 1 and (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse_point(metadata)
+        ):
+            # Git addresses worktree paths lexically. An indirection or non-directory
+            # ancestor means the indexed child is absent; following it could hash an
+            # unrelated in-repository (or external) substitute.
+            return _missing_record(path)
+    if metadata is None:
+        return _missing_record(path)
     mode = format(metadata.st_mode & 0o177777, "06o")
     if stat.S_ISLNK(metadata.st_mode):
-        payload = os.readlink(target).encode("utf-8", errors="surrogateescape")
+        try:
+            payload = os.readlink(target).encode("utf-8", errors="surrogateescape")
+        except OSError as exc:
+            raise ValueError(f"unable to read reviewed surface symlink {path}: {exc}") from exc
         state = "symlink"
+    elif _is_reparse_point(metadata):
+        # Never follow an unmodelled Windows reparse leaf. Git-native symlinks are
+        # handled above; other reparse objects remain opaque worktree objects.
+        payload = b""
+        state = "other"
     elif stat.S_ISREG(metadata.st_mode):
-        payload = target.read_bytes()
+        if metadata.st_nlink != 1:
+            raise ValueError(f"reviewed surface file must not be hard-linked: {path}")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(target, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise ValueError(f"reviewed surface file changed during capture: {path}")
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                descriptor = None
+                payload = handle.read()
+        except OSError as exc:
+            raise ValueError(f"unable to read reviewed surface file {path}: {exc}") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         state = "file"
     elif stat.S_ISDIR(metadata.st_mode):
         payload = b""
@@ -90,7 +206,21 @@ def path_record(repo_root: Path, raw_path: str) -> dict[str, str]:
 
 
 def reference_record(repo_root: Path, raw_path: str) -> dict[str, str]:
-    record = path_record(repo_root, raw_path)
+    path = normalize_path(raw_path)
+    cursor = repo_root
+    for part in path.split("/"):
+        cursor = cursor / part
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            raise ValueError(f"explicit reviewed reference is not a readable regular file: {path}: {exc}") from exc
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
+            raise ValueError(f"explicit reviewed reference contains symlink or reparse indirection: {path}")
+    if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+        raise ValueError(f"explicit reviewed reference must not be hard-linked: {path}")
+    record = path_record(repo_root, path)
     if record["state"] != "file":
         raise ValueError(
             f"explicit reviewed reference must resolve directly to a regular file: {record['path']} "
@@ -100,8 +230,8 @@ def reference_record(repo_root: Path, raw_path: str) -> dict[str, str]:
 
 
 def git_path_record(repo_root: Path, commit: str, raw_path: str) -> dict[str, str]:
-    path = normalize_path(raw_path)
-    rows = _git_z(repo_root, "ls-tree", "-z", commit, "--", path)
+    path = git_path(raw_path)
+    rows = _git_z(repo_root, "--literal-pathspecs", "ls-tree", "-z", commit, "--", path)
     if not rows:
         return {"path": path, "state": "missing", "mode": "none", "sha256": "none"}
     metadata, separator, listed_path = rows[0].partition("\t")
@@ -138,7 +268,9 @@ def capture(
         "baseline": baseline,
         "comparison": comparison,
         "changed": [
-            path_record(repo_root, path) if comparison == "working-tree" else git_path_record(repo_root, comparison, path)
+            path_record(repo_root, path, from_git=True)
+            if comparison == "working-tree"
+            else git_path_record(repo_root, comparison, path)
             for path in changed
         ],
         "references": [reference_record(repo_root, path) for path in normalized_refs],
@@ -188,7 +320,7 @@ def parse(bundle_content: str) -> tuple[dict[str, object] | None, list[str]]:
                 issues.append(f"reviewed surface {field} contains an invalid record")
                 continue
             try:
-                if normalize_path(record["path"]) != record["path"]:
+                if git_path(record["path"]) != record["path"]:
                     issues.append(f"reviewed surface {field} contains a noncanonical path")
             except ValueError:
                 issues.append(f"reviewed surface {field} contains an invalid path")

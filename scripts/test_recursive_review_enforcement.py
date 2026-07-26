@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,7 @@ def load_module(file_name: str, module_name: str):
 phase_rules = load_module("recursive_phase_rules.py", "single_contract_phase_rules")
 review = load_module("recursive_review_ledger.py", "single_contract_review_ledger")
 lint = load_module("lint-recursive-run.py", "single_contract_lint")
+status = load_module("recursive-status.py", "single_contract_status")
 closeout = load_module("recursive-closeout.py", "single_contract_closeout")
 
 
@@ -132,6 +135,114 @@ class RecursiveReviewSingleContractTest(unittest.TestCase):
         self.assertNotIn("## Review Metadata", phase5)
         closeout.ensure_review_roots(self.run, "05-manual-qa.md")
         self.assertFalse((self.run / "evidence/reviews/phase-5").exists())
+
+    def action_record(self, execution_mode: str) -> str:
+        artifact = self.run / "03-implementation-summary.md"
+        artifact_hash = hashlib.sha256(artifact.read_text(encoding="utf-8").encode()).hexdigest()
+        return f"""## Metadata
+
+- Subagent ID: worker-1
+- Run ID: demo
+- Phase: Phase 3
+- Purpose: delegated work
+- Execution Mode: {execution_mode}
+- Timestamp: 2026-01-01T00:00:00Z
+
+## Inputs Provided
+
+- Current Artifact: `/.recursive/run/demo/03-implementation-summary.md`
+- Artifact Content Hash: {artifact_hash}
+- Diff Basis: baseline..working-tree
+
+## Claimed Actions Taken
+
+- completed delegated work
+
+## Claimed File Impact
+
+### Reviewed
+- `product.py`
+
+## Claimed Artifact Impact
+
+### Read
+- `/.recursive/run/demo/03-implementation-summary.md`
+
+## Claimed Findings
+
+- none
+
+## Verification Handoff
+
+- controller verification required
+"""
+
+    def phase_with_action(self, action_name: str, acceptance: str = "accepted") -> str:
+        return f"""Phase: Phase 3
+
+## Audit Context
+
+- Audit Execution Mode: subagent
+
+## Review Metadata
+
+- Review Ledger Path: `/.recursive/run/demo/evidence/reviews/phase-3/current-review/ledger.md`
+- Review Bundle Path: `/.recursive/run/demo/evidence/review-bundles/phase-3/current-review/0001.md`
+
+## Subagent Contribution Verification
+
+- Reviewed Action Records:
+  - `/.recursive/run/demo/subagents/{action_name}`
+- Main-Agent Verification Performed: `/.recursive/run/demo/03-implementation-summary.md`
+- Acceptance Decision: {acceptance}
+- Refresh Handling: current pass checked
+- Repair Performed After Verification: none
+"""
+
+    def test_subagent_audit_gate_rejects_non_review_actions_in_lint_and_status(self) -> None:
+        artifact = self.run / "03-implementation-summary.md"
+        artifact.write_text("implementation summary\n", encoding="utf-8")
+        subagents = self.run / "subagents"
+        subagents.mkdir()
+        gate_text = "requires at least one accepted review/audit action record"
+        for execution_mode in ("implementer", "repair", "review-repair", "testing"):
+            with self.subTest(execution_mode=execution_mode):
+                name = f"{execution_mode}.md"
+                (subagents / name).write_text(self.action_record(execution_mode), encoding="utf-8")
+                content = self.phase_with_action(name)
+                lint_issues = lint.lint_subagent_contribution_verification(
+                    artifact, content, self.run, self.root, ["product.py"]
+                )
+                status_issues = status.collect_subagent_contribution_blockers(
+                    artifact.name, content, self.run, self.root, ["product.py"]
+                )
+                self.assertTrue(any(gate_text in issue for issue in lint_issues), lint_issues)
+                self.assertTrue(any(gate_text in issue for issue in status_issues), status_issues)
+
+    def test_subagent_audit_gate_requires_controller_acceptance(self) -> None:
+        artifact = self.run / "03-implementation-summary.md"
+        artifact.write_text("implementation summary\n", encoding="utf-8")
+        subagents = self.run / "subagents"
+        subagents.mkdir()
+        name = "review.md"
+        (subagents / name).write_text(self.action_record("review"), encoding="utf-8")
+        valid_binding = lint.review_action.ActionValidation([])
+        gate_text = "requires at least one accepted review/audit action record"
+        with mock.patch.object(
+            lint.review_action,
+            "validate_review_audit_action_record",
+            return_value=valid_binding,
+        ):
+            rejected = self.phase_with_action(name, acceptance="rejected")
+            accepted = self.phase_with_action(name, acceptance="accepted")
+            for collect in (
+                lambda text: lint.lint_subagent_contribution_verification(artifact, text, self.run, self.root, []),
+                lambda text: status.collect_subagent_contribution_blockers(artifact.name, text, self.run, self.root, []),
+            ):
+                rejected_issues = collect(rejected)
+                accepted_issues = collect(accepted)
+                self.assertTrue(any(gate_text in issue for issue in rejected_issues), rejected_issues)
+                self.assertFalse(any(gate_text in issue for issue in accepted_issues), accepted_issues)
 
 
 if __name__ == "__main__":

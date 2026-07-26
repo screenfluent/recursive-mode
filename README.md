@@ -195,26 +195,39 @@ Benefits of this memory model include:
 Install the main skill:
 
 ```bash
-npx skills add try-works/recursive-mode
+npx skills add screenfluent/recursive-mode
 ```
 
 List everything in the package:
 
 ```bash
-npx skills add try-works/recursive-mode --list
-npx skills add try-works/recursive-mode --list --full-depth
+npx skills add screenfluent/recursive-mode --list
+npx skills add screenfluent/recursive-mode --list --full-depth
 ```
 
 Install all included skills:
 
 ```bash
-npx skills add try-works/recursive-mode --skill '*' --full-depth
+npx skills add screenfluent/recursive-mode --skill '*' --full-depth
 ```
 
-Install a single subskill:
+Install only `recursive-spec` for its standalone Interview and Synthesize drafting branches:
 
 ```bash
-npx skills add try-works/recursive-mode --skill recursive-spec --full-depth
+npx skills add screenfluent/recursive-mode --skill recursive-spec --full-depth
+```
+
+That single-skill install does not provide the integrated workflow. Use the smallest set that matches the branch:
+
+```bash
+# Approve requirements and create an ordinary Recursive run
+npx skills add screenfluent/recursive-mode --skill recursive-mode recursive-spec --full-depth
+
+# Materialize delivery slices or amend an active delivery specification
+npx skills add screenfluent/recursive-mode --skill recursive-mode recursive-spec recursive-delivery-slicing --full-depth
+
+# Add routed delegated help to the delivery flow
+npx skills add screenfluent/recursive-mode --skill recursive-mode recursive-spec recursive-delivery-slicing recursive-router recursive-subagent --full-depth
 ```
 
 Install the benchmark add-on only when you explicitly want benchmark runs:
@@ -225,7 +238,7 @@ npx skills add <recursive-benchmark-package-or-repo> --full-depth
 
 ## Quick Start
 
-After installing the skill package into your agent environment, the intended normal flow is:
+After installing the integrated `recursive-mode` and `recursive-spec` set (or all included skills) into your agent environment, the intended normal flow is:
 
 1. open a target git repository
 2. if requirements do not exist yet, use `recursive-spec` to draft them from plan/spec prompts such as `create a plan`, `help me plan`, or `create a spec`
@@ -235,7 +248,7 @@ After installing the skill package into your agent environment, the intended nor
 
 `recursive-spec` is intentionally approval-gated: it should collaborate on the draft first, keep that draft in temporary/session storage, and only create `/.recursive/run/<run-id>/00-requirements.md` after the user approves the spec.
 
-If you want to measure recursive-mode itself, install `recursive-benchmark` on demand from its dedicated add-on package or repo source. This repository still carries the maintainer harness and fixture sources for that add-on, but `npx skills add try-works/recursive-mode --skill '*' --full-depth` should not expose it as part of the default recursive-mode package.
+If you want to measure recursive-mode itself, install `recursive-benchmark` on demand from its dedicated add-on package or repo source. This repository still carries the maintainer harness and fixture sources for that add-on, but `npx skills add screenfluent/recursive-mode --skill '*' --full-depth` should not expose it as part of the default recursive-mode package.
 
 Manual bootstrap commands remain the fallback path when the runtime cannot auto-run the installer:
 
@@ -271,7 +284,7 @@ The installable root skill entrypoint is:
 
 ## Benchmarking recursive-mode
 
-The benchmark add-on stays separate from the default recursive-mode package. This repository still carries the harness and fixture sources used to maintain that add-on, but the default `try-works/recursive-mode` install should not surface `recursive-benchmark` as a full-depth subskill.
+The benchmark add-on stays separate from the default recursive-mode package. This repository still carries the harness and fixture sources used to maintain that add-on, but the default `screenfluent/recursive-mode` install should not surface `recursive-benchmark` as a full-depth subskill.
 
 The packaged benchmark flow is meant to answer a simple question: **does recursive-mode improve real coding-agent outcomes on the same project?**
 

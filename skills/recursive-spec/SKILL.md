@@ -9,6 +9,12 @@ Own requirements before a run starts or between delivery slice runs. Produce a r
 
 Do not replace `/.recursive/RECURSIVE.md`, skip ahead to Phase 2 planning, or start Phase 3 implementation.
 
+## Check the installed branch
+
+Interview and Synthesize can draft requirements with this skill alone. Writing an ordinary run also requires the `recursive-mode` runtime. Materialize and Amend require both `recursive-mode` and `recursive-delivery-slicing`; delegated routed help additionally requires `recursive-router` and `recursive-subagent`.
+
+If the selected branch's dependency is unavailable, stop and name the missing skill. Do not claim the integrated branch from a standalone `recursive-spec` installation.
+
 ## Choose the authoring branch
 
 Choose one branch from the available evidence:
@@ -98,7 +104,7 @@ Complete when every `R#` has a clear description and observable acceptance crite
 The branch determines the output:
 
 - a single run or approved ready slice writes `/.recursive/run/<run-id>/00-requirements.md`
-- an approved multi-run route hands its draft to `recursive-delivery-slicing`, which writes `/.recursive/deliveries/<delivery-id>/spec.md`, the manifest, and slices after the human approves the split and edges
+- an approved multi-run route hands its approved requirements content to `recursive-delivery-slicing`, which persists that content unchanged as `/.recursive/deliveries/<delivery-id>/spec.md` while materializing the approved manifest and slices
 - an approved active-delivery amendment appends to the existing delivery `spec.md` without creating a run or changing the manifest
 
 A run's `00-requirements.md` preserves the scaffolded header and required `## TODO` section from `recursive-init`, replacing placeholder checklist items rather than deleting the heading. It contains `## Requirements`, `## Out of Scope`, and `## Constraints`; each `R#` has a short title, clear description, and observable acceptance criteria. Carry relevant settled testing decisions into the run requirements.
@@ -115,6 +121,6 @@ Immediately before choosing a CLI or model for delegated critique or review, re-
 
 ## Boundaries
 
-- Requirements ownership stays here; `recursive-delivery-slicing` owns only the cross-run DAG.
+- This skill authors and owns the requirements content in `spec.md`, including approved amendments. `recursive-delivery-slicing` may persist the approved content while materializing the delivery tree, but owns only slice decomposition, edges, and cross-run DAG state and must not rewrite requirements.
 - Phase 2 owns planning and Phase 3 owns implementation.
 - Repository artifacts receive only approved drafts.

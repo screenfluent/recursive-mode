@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,6 +47,87 @@ def windows_temp_source_fixture() -> str:
 
 
 class InstallRecursiveModeTests(unittest.TestCase):
+    def _assert_skills_cli_local_install_set(self, *required_skills: str) -> None:
+        if os.environ.get("RUN_SKILLS_CLI_INTEGRATION") != "1":
+            self.skipTest("Set RUN_SKILLS_CLI_INTEGRATION=1 to enable local Skills CLI integration coverage")
+
+        npx = shutil.which("npx")
+        if npx is None:
+            self.skipTest("npx is required for Skills CLI integration coverage")
+
+        with tempfile.TemporaryDirectory(prefix="skills-cli-distribution-") as temp_dir:
+            workspace = Path(temp_dir)
+            completed = subprocess.run(
+                [
+                    npx,
+                    "skills",
+                    "add",
+                    str(REPO_ROOT),
+                    "--skill",
+                    *required_skills,
+                    "--full-depth",
+                    "--agent",
+                    "codex",
+                    "-y",
+                ],
+                cwd=workspace,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                timeout=180,
+            )
+
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"skills add failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}",
+            )
+            installed_skills = workspace / ".agents" / "skills"
+            self.assertEqual(set(required_skills), {path.name for path in installed_skills.iterdir()})
+            for skill_name in required_skills:
+                with self.subTest(skill=skill_name):
+                    self.assertTrue((installed_skills / skill_name / "SKILL.md").exists())
+
+    def test_documented_recursive_mode_install_commands_use_published_fork(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        install_section = readme.split("## Install", 1)[1].split("## Quick Start", 1)[0]
+        recursive_mode_sources = re.findall(
+            r"^npx skills add (\S*recursive-mode\S*)",
+            install_section,
+            flags=re.MULTILINE,
+        )
+
+        self.assertTrue(recursive_mode_sources)
+        self.assertEqual({"screenfluent/recursive-mode"}, set(recursive_mode_sources))
+        self.assertNotIn("try-works/recursive-mode", readme)
+
+    def test_documented_recursive_spec_install_sets_cover_supported_branches(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        install_section = readme.split("## Install", 1)[1].split("## Quick Start", 1)[0]
+        selected_skill_sets = {
+            tuple(tokens[tokens.index("--skill") + 1 : tokens.index("--full-depth")])
+            for line in install_section.splitlines()
+            if line.startswith("npx skills add screenfluent/recursive-mode --skill")
+            for tokens in (shlex.split(line),)
+        }
+
+        self.assertTrue(
+            {
+                ("recursive-spec",),
+                ("recursive-mode", "recursive-spec"),
+                ("recursive-mode", "recursive-spec", "recursive-delivery-slicing"),
+                (
+                    "recursive-mode",
+                    "recursive-spec",
+                    "recursive-delivery-slicing",
+                    "recursive-router",
+                    "recursive-subagent",
+                ),
+            }.issubset(selected_skill_sets)
+        )
+
     def test_package_surface_matches_expected_skills(self) -> None:
         repo_root = REPO_ROOT
         installable_skills = {path.parent.name for path in (repo_root / "skills").glob("*/SKILL.md")}
@@ -142,6 +225,51 @@ class InstallRecursiveModeTests(unittest.TestCase):
             for source_path in source_repository_only_paths:
                 with self.subTest(body=body_name, source_path=source_path):
                     self.assertNotIn(source_path, body)
+
+    def test_tracked_model_facing_bridges_match_installer_generated_blocks(self) -> None:
+        bridges = (
+            (
+                REPO_ROOT / ".agent" / "PLANS.md",
+                "<!-- RECURSIVE-MODE-PLANS-BRIDGE:START -->",
+                "<!-- RECURSIVE-MODE-PLANS-BRIDGE:END -->",
+                install.plans_bridge_body(),
+            ),
+            (
+                REPO_ROOT / ".recursive" / "AGENTS.md",
+                "<!-- RECURSIVE-MODE-AGENTS:START -->",
+                "<!-- RECURSIVE-MODE-AGENTS:END -->",
+                install.recursive_agents_router_body(),
+            ),
+        )
+
+        for path, start_marker, end_marker, generated_body in bridges:
+            with self.subTest(path=str(path.relative_to(REPO_ROOT))):
+                content = path.read_bytes()
+                start_bytes = start_marker.encode("utf-8")
+                end_bytes = end_marker.encode("utf-8")
+                self.assertEqual(1, content.count(start_bytes))
+                self.assertEqual(1, content.count(end_bytes))
+                actual_block = content[
+                    content.index(start_bytes) : content.index(end_bytes) + len(end_bytes)
+                ]
+                expected_block = (
+                    start_bytes
+                    + b"\n"
+                    + generated_body.rstrip("\r\n").encode("utf-8")
+                    + b"\n"
+                    + end_bytes
+                )
+                self.assertEqual(expected_block, actual_block)
+
+    def test_generated_delegated_review_route_includes_finding_protocol_owner(self) -> None:
+        body = install.recursive_agents_router_body()
+        delegated_review_route = body.split(
+            "- Working on delegated review, subagent behavior, or routed CLI delegation:",
+            1,
+        )[1].split("- Working on memory behavior:", 1)[0]
+
+        self.assertIn("`recursive-review`", delegated_review_route)
+        self.assertIn("`recursive-review-bundle`", delegated_review_route)
 
     def test_gitattributes_excludes_benchmark_add_on_from_default_exports(self) -> None:
         gitattributes = Path(__file__).resolve().parent.parent / ".gitattributes"
@@ -949,6 +1077,19 @@ printf '%s\n' 'Skipped RECURSIVE.md update by configuration.'
                 if path.is_file() and ".git" not in path.parts
             }
             self.assertEqual(first_snapshot, second_snapshot)
+
+    def test_skills_cli_local_recursive_spec_install_is_standalone(self) -> None:
+        self._assert_skills_cli_local_install_set("recursive-spec")
+
+    def test_skills_cli_local_routed_delivery_install_has_dependency_closure(self) -> None:
+        required_skills = (
+            "recursive-mode",
+            "recursive-spec",
+            "recursive-delivery-slicing",
+            "recursive-router",
+            "recursive-subagent",
+        )
+        self._assert_skills_cli_local_install_set(*required_skills)
 
     def test_repo_root_router_policy_is_not_personalized(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
